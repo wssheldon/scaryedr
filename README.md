@@ -1,5 +1,27 @@
 # scary
 
+```bash
+🐝 Starting the process execution monitor... 🐝
+
+{
+  "pid": 162137,
+  "ppid": 1175,
+  "tid": 162137,
+  "uid": 0,
+  "gid": 0,
+  "comm": "bash",
+  "filename": "/usr/bin/cat",
+  "args": [
+    "cat",
+    "/root/.ssh/authorized_keys"
+  ],
+  "username": "root",
+  "hostname": "ubuntu-32gb-hil-1"
+}
+
+2024-10-16T00:58:32.823465Z  INFO scary_logger_plugins::s3: Flushing 1 events to S3
+```
+
 ## Prerequisites
 
 1. Install bpf-linker: `cargo install bpf-linker`
