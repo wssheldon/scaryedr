@@ -1,0 +1,30 @@
+[package]
+name = "scary"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+aws-sdk-s3 = "0.28.0"
+aya = { workspace = true }
+aya-log = { workspace = true }
+bytes = "1.0"
+clap = { workspace = true, features = ["derive"] }
+config = "0.14.0"
+env_logger = {workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+mpsc = "0.2.3"
+nix = "0.26.2"
+scary-common = { path = "../scary-common", features = ["user"] }
+scary-logger-plugins = { path = "../scary-logger-plugins" }
+scary-userspace-common = { path = "../scary-userspace-common" }
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.128"
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+
+[[bin]]
+name = "scary"
+path = "src/main.rs"

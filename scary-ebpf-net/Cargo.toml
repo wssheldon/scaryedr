@@ -1,0 +1,14 @@
+[package]
+name = "scary-ebpf-net"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-ebpf = { git = "https://github.com/aya-rs/aya" }
+aya-log-ebpf = { git = "https://github.com/aya-rs/aya" }
+scary-common = { path = "../scary-common" }
+network-types = "0.0.7"
+
+[[bin]]
+name = "scary-ebpf"
+path = "src/main.rs"

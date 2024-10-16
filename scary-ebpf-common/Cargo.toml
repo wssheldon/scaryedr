@@ -1,0 +1,14 @@
+[package]
+name = "scary-ebpf-common"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.bpf]
+name = "scary-ebpf-common"
+
+[dependencies]
+aya-ebpf = { git = "https://github.com/aya-rs/aya" }
+aya-log-ebpf = { git = "https://github.com/aya-rs/aya" }
+
+[lib]
+crate-type = ["rlib"]
