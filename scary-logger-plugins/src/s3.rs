@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::time::sleep;
-use tracing::{debug, error, field, info, warn};
+use tracing::{debug, error, info, warn};
 use zstd::stream::write::Encoder as ZstdEncoder;
 
 #[derive(Clone)]

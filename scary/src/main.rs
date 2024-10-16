@@ -26,11 +26,7 @@ use std::{
 };
 use tokio::signal;
 use tokio::sync::mpsc;
-use tokio::task::spawn_blocking;
 use tokio::task::JoinHandle;
-
-use tracing_subscriber::filter::LevelFilter;
-use tracing_subscriber::fmt;
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -237,7 +233,7 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 }
 
-async fn run_fim(config: &AgentConfig) -> Result<(), anyhow::Error> {
+async fn run_fim(_config: &AgentConfig) -> Result<(), anyhow::Error> {
     // Load the process execution eBPF program
     let fim_ebpf = Box::leak(Box::new(Ebpf::load(include_bytes_aligned!(
         "../../target/bpfel-unknown-none/release/scary-ebpf-file-lsm"
@@ -364,7 +360,9 @@ async fn run_proc_exec(
 
     let mut perf_array = PerfEventArray::try_from(ebpf.map_mut("EVENTS").unwrap())?;
 
-    for cpu_id in online_cpus().map_err(|e| anyhow::anyhow!("Failed to get online CPUs: {:?}", e))? {
+    for cpu_id in
+        online_cpus().map_err(|e| anyhow::anyhow!("Failed to get online CPUs: {:?}", e))?
+    {
         let mut buf = perf_array.open(cpu_id, None)?;
         let tx = tx.clone();
         let shutdown = shutdown.clone();
@@ -437,7 +435,6 @@ async fn run_proc_exec(
 
     Ok(())
 }
-
 
 async fn handle_logging(mut rx: mpsc::Receiver<EventJson>, logger: Arc<dyn LoggerPlugin>) {
     while let Some(event_json) = rx.recv().await {
