@@ -9,7 +9,8 @@ use aya_log::EbpfLogger;
 use bytes::BytesMut;
 use clap::Parser;
 use config::{Config, File};
-use log::{info, warn};
+use log::{debug, error, info, warn};
+use nix::sys::utsname::uname;
 use nix::unistd::User;
 use scary_logger_plugins::s3::{S3Logger, S3LoggerConfig};
 use scary_userspace_common::logger::config::LoggerConfig;
@@ -81,11 +82,13 @@ struct EventJson {
     filename: String,
     args: Vec<String>,
     username: String,
+    hostname: String,
 }
 
 impl EventData {
     fn to_json(&self) -> EventJson {
         EventJson {
+            hostname: Self::get_hostname(),
             pid: self.event.pid,
             ppid: self.event.ppid,
             tid: self.event.tid,
@@ -129,6 +132,12 @@ impl EventData {
             }
         }
         args
+    }
+
+    fn get_hostname() -> String {
+        uname()
+            .map(|info| info.nodename().to_string_lossy().into_owned())
+            .unwrap_or_else(|_| String::from("unknown"))
     }
 
     /// Get a username by UID.
@@ -287,6 +296,7 @@ async fn run_fim(_config: &AgentConfig) -> Result<(), anyhow::Error> {
 
                     // Create the JSON object for the FIM event
                     let event_json = EventJson {
+                        hostname: "".to_string(),
                         pid: data.pid,
                         ppid: 0,
                         tid: 0,
@@ -392,8 +402,8 @@ async fn run_proc_exec(
                     // Process event and create EventJson...
                     let event_json = data.to_json();
 
-                    // Serialize to JSON string
-                    match serde_json::to_string(&event_json) {
+                    // Serialize to pretty-printed JSON string
+                    match serde_json::to_string_pretty(&event_json) {
                         Ok(json_str) => println!("{}", json_str),
                         Err(e) => eprintln!("Error serializing exec event to JSON: {}", e),
                     }
@@ -401,9 +411,9 @@ async fn run_proc_exec(
                     // Send the event to the logging task
                     // Since we're in a blocking context, use `blocking_send`
                     if let Err(e) = tx.blocking_send(event_json) {
-                        eprintln!("Error sending event to logging task: {}", e);
+                        error!("Error sending event to logging task: {}", e);
                     } else {
-                        println!("Sent event to logger...");
+                        debug!("Sent event to logger...");
                     }
                 }
             }
@@ -438,23 +448,22 @@ async fn run_proc_exec(
 
 async fn handle_logging(mut rx: mpsc::Receiver<EventJson>, logger: Arc<dyn LoggerPlugin>) {
     while let Some(event_json) = rx.recv().await {
-        println!("Received event for logging..."); // Added for debugging
         let json_value: Value = match serde_json::to_value(event_json) {
             Ok(value) => value,
             Err(e) => {
-                eprintln!("Error converting event to JSON value: {}", e);
+                error!("Error converting event to JSON value: {}", e);
                 continue;
             }
         };
 
         // Log event using the logger plugin
         if let Err(e) = logger.log_event(json_value).await {
-            eprintln!("Error logging event: {}", e);
+            error!("Error logging event: {}", e);
         }
     }
 
     // Ensure the remaining events are flushed when all events are received
     if let Err(e) = logger.flush().await {
-        eprintln!("Error flushing events on shutdown: {}", e);
+        error!("Error flushing events on shutdown: {}", e);
     }
 }
