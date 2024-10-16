@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, field, info, warn};
 use zstd::stream::write::Encoder as ZstdEncoder;
 
 #[derive(Clone)]
@@ -175,9 +175,12 @@ impl S3Logger {
         let time_since_last_flush = now.duration_since(*last_flush)?;
         let batch_size = self.batch.lock().await.len();
 
-        tracing::debug!(
-            "Checking if flush is needed. Time since last flush: {:?}, Current batch size: {}, Flush interval: {:?}, Batch size limit: {}",
-            time_since_last_flush, batch_size, self.flush_interval, self.batch_size
+        debug!(
+            time_since_last_flush = ?time_since_last_flush,
+            current_batch_size = batch_size,
+            flush_interval = ?self.flush_interval,
+            batch_size_limit = self.batch_size,
+            "Checking if flush is needed"
         );
 
         if time_since_last_flush > self.flush_interval || batch_size >= self.batch_size {
