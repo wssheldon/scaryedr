@@ -5,17 +5,19 @@ use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::{config::Region, error::SdkError, Client};
 use chrono::{DateTime, Datelike, Timelike, Utc};
 
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use scary_userspace_common::logger::LoggerPlugin;
 use serde_json::Value;
 use std::fmt;
 use std::io::Write;
+use std::panic;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
-use zstd::stream::write::Encoder as ZstdEncoder;
 
 #[derive(Clone)]
 pub struct S3Logger {
@@ -52,39 +54,50 @@ pub struct HivePartitionedS3Key {
 }
 
 impl HivePartitionedS3Key {
-    /// Creates a new HivePartitionedS3Key with the current UTC time.
     pub fn new(prefix: String) -> Self {
         let now = Utc::now();
-        Self {
+        debug!(
+            "Creating new HivePartitionedS3Key with current UTC time: {:?}",
+            now
+        );
+        let key = Self {
             prefix,
             year: now.year(),
             month: now.month(),
             day: now.day(),
             hour: now.hour(),
             timestamp: now.timestamp_nanos_opt().unwrap_or(0),
-        }
+        };
+        debug!("Created HivePartitionedS3Key: {:?}", key);
+        key
     }
 
-    /// Creates a new HivePartitionedS3Key with a specific DateTime.
     pub fn with_datetime(prefix: String, dt: DateTime<Utc>) -> Self {
-        Self {
+        debug!(
+            "Creating HivePartitionedS3Key with provided DateTime: {:?}",
+            dt
+        );
+        let key = Self {
             prefix,
             year: dt.year(),
             month: dt.month(),
             day: dt.day(),
             hour: dt.hour(),
             timestamp: dt.timestamp_nanos_opt().unwrap_or(0),
-        }
+        };
+        debug!("Created HivePartitionedS3Key: {:?}", key);
+        key
     }
 }
 
 impl fmt::Display for HivePartitionedS3Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
+        let formatted = format!(
             "{}/year={}/month={:02}/day={:02}/hour={:02}/{}.json.zst",
             self.prefix, self.year, self.month, self.day, self.hour, self.timestamp
-        )
+        );
+        debug!("Formatted HivePartitionedS3Key: {}", formatted);
+        write!(f, "{}", formatted)
     }
 }
 
@@ -249,12 +262,39 @@ impl S3Logger {
     /// This method will return an `Error` if there's an issue during key generation,
     /// data compression, or the S3 upload process.
     async fn upload_batch(&self, batch: Vec<Value>) -> Result<(), Error> {
-        debug!("Uploading batch of {} events to S3", batch.len());
+        debug!(
+            "Starting batch upload process. Batch size: {} events",
+            batch.len()
+        );
 
         let key = self.generate_s3_key();
-        let compressed_data = self.compress_batch(&batch)?;
+        debug!("Generated S3 key for batch upload: {:?}", key);
 
-        self.upload_to_s3(key, compressed_data).await
+        let compressed_data = match self.compress_batch(&batch) {
+            Ok(data) => {
+                debug!(
+                    "Successfully compressed batch data. Compressed size: {} bytes",
+                    data.len()
+                );
+                data
+            }
+            Err(e) => {
+                error!("Failed to compress batch data: {:?}", e);
+                return Err(e);
+            }
+        };
+
+        debug!("Attempting to upload compressed data to S3");
+        match self.upload_to_s3(key, compressed_data).await {
+            Ok(_) => {
+                debug!("Successfully uploaded batch to S3");
+                Ok(())
+            }
+            Err(e) => {
+                error!("Failed to upload batch to S3: {:?}", e);
+                Err(e)
+            }
+        }
     }
 
     /// Generates an S3 key following the Hive partition strategy.
@@ -290,7 +330,10 @@ impl S3Logger {
     /// For more details on Hive partitioning, see the Apache Hive documentation:
     /// https://cwiki.apache.org/confluence/display/Hive/LanguageManual+DDL#LanguageManualDDL-PartitionedTables
     fn generate_s3_key(&self) -> HivePartitionedS3Key {
-        HivePartitionedS3Key::new(self.prefix.clone())
+        debug!("Generating S3 key with prefix: {}", self.prefix);
+        let key = HivePartitionedS3Key::new(self.prefix.clone());
+        debug!("Generated S3 key: {:?}", key);
+        key
     }
 
     /// Compresses a batch of log events using Zstandard compression.
@@ -308,11 +351,56 @@ impl S3Logger {
     /// This method will return an `Error` if there's an issue during JSON serialization
     /// or Zstandard compression.
     fn compress_batch(&self, batch: &[Value]) -> Result<Vec<u8>, Error> {
-        let json_string = serde_json::to_string(batch)?;
-        let mut compressed = Vec::new();
-        let mut encoder = ZstdEncoder::new(&mut compressed, 3)?;
-        encoder.write_all(json_string.as_bytes())?;
-        encoder.finish()?;
+        debug!(
+            "Starting batch compression. Batch size: {} events",
+            batch.len()
+        );
+
+        let json_string = match serde_json::to_string(batch) {
+            Ok(s) => {
+                debug!(
+                    "Successfully serialized batch to JSON. JSON size: {} bytes",
+                    s.len()
+                );
+                s
+            }
+            Err(e) => {
+                error!("Failed to serialize batch to JSON: {:?}", e);
+                return Err(Error::from(e));
+            }
+        };
+
+        debug!("Creating Gzip encoder...");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+
+        debug!("Writing JSON data and compressing...");
+        match encoder.write_all(json_string.as_bytes()) {
+            Ok(_) => {
+                debug!("Successfully wrote data to Gzip encoder");
+            }
+            Err(e) => {
+                error!("Failed to write JSON data to Gzip encoder: {:?}", e);
+                return Err(Error::from(e));
+            }
+        }
+
+        debug!("Finishing Gzip compression...");
+        let compressed = match encoder.finish() {
+            Ok(data) => {
+                debug!("Successfully finished Gzip compression");
+                debug!("Compressed size: {} bytes", data.len());
+
+                if data.is_empty() {
+                    warn!("Compressed data is empty. This might indicate a compression issue.");
+                }
+                data
+            }
+            Err(e) => {
+                error!("Failed to finish Gzip compression: {:?}", e);
+                return Err(Error::from(e));
+            }
+        };
+
         Ok(compressed)
     }
 
@@ -381,16 +469,27 @@ impl S3Logger {
     ///
     /// This method will return an `Error` if the S3 PUT operation fails.
     async fn try_upload(&self, key: &HivePartitionedS3Key, data: &[u8]) -> Result<(), Error> {
-        self.client
+        debug!("Attempting S3 PUT operation for key: {}", key);
+        let result = self
+            .client
             .put_object()
             .bucket(&self.bucket)
             .key(key.to_string())
             .body(data.to_vec().into())
             .content_encoding("zstd")
             .send()
-            .await
-            .map(|_| ())
-            .map_err(Error::from)
+            .await;
+
+        match result {
+            Ok(_) => {
+                debug!("S3 PUT operation successful for key: {}", key);
+                Ok(())
+            }
+            Err(e) => {
+                error!("S3 PUT operation failed for key {}: {:?}", key, e);
+                Err(Error::from(e))
+            }
+        }
     }
 
     /// Determines if an S3 error is retryable.
