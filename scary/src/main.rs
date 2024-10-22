@@ -6,6 +6,7 @@ use aya::{
     Btf, Ebpf,
 };
 use aya_log::EbpfLogger;
+use base64::{engine::general_purpose, Engine as _};
 use bytes::BytesMut;
 use chrono::{DateTime, Utc};
 use clap::Parser;
@@ -84,6 +85,7 @@ struct NetworkConnectionJson {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EventJson {
+    exec_id: String,
     pid: u32,
     ppid: u32,
     tid: u32,
@@ -102,6 +104,7 @@ struct EventJson {
 impl UserSpaceEventData {
     fn to_json(&self) -> EventJson {
         EventJson {
+            exec_id: self.get_exec_id(),
             hostname: Self::get_hostname(),
             pid: self.0.event.pid,
             ppid: self.0.event.ppid,
@@ -116,6 +119,11 @@ impl UserSpaceEventData {
             timestamp: Self::format_timestamp(self.0.event.timestamp_ns),
             // network_connections: self.get_network_connections(),
         }
+    }
+
+    fn get_exec_id(&self) -> String {
+        // Convert the exec_id bytes to a base64 string
+        general_purpose::STANDARD.encode(&self.0.event.exec_id)
     }
 
     fn format_timestamp(timestamp_ns: u64) -> String {
@@ -463,15 +471,14 @@ async fn run_proc_exec(
         }
     }
 
-    // Attach process execution tracer
-    let exec_trace: &mut TracePoint = ebpf.program_mut("handle_exec").unwrap().try_into()?;
-    exec_trace.load()?;
-    exec_trace.attach("syscalls", "sys_enter_execve")?;
+    // Attach process execution tracers
+    let exec_enter: &mut TracePoint = ebpf.program_mut("handle_exec").unwrap().try_into()?;
+    exec_enter.load()?;
+    exec_enter.attach("syscalls", "sys_enter_execve")?;
 
-    // Attach tcp_connect kprobe
-    // let tcp_connect: &mut KProbe = ebpf.program_mut("tcp_connect").unwrap().try_into()?;
-    // tcp_connect.load()?;
-    // tcp_connect.attach("tcp_connect", 0)?;
+    let exec_exit: &mut TracePoint = ebpf.program_mut("handle_exec_exit").unwrap().try_into()?;
+    exec_exit.load()?;
+    exec_exit.attach("sched", "sched_process_exec")?;
 
     info!("🐝 Scary eBPF Process Execution Monitor is running 🎃. Waiting for Ctrl-C...");
 
