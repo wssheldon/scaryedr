@@ -3,6 +3,9 @@ name = "scary"
 version = "0.1.0"
 edition = "2021"
 
+ebpf_debug_path = "target/bpfel-unknown-none/debug"
+ebpf_release_path = "target/bpfel-unknown-none/release"
+
 [dependencies]
 anyhow = { workspace = true }
 aws-sdk-s3 = "0.28.0"
@@ -27,6 +30,7 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net"
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
 base64 = "0.22.1"
+lazy_static = "1.5.0"
 
 [[bin]]
 name = "scary"

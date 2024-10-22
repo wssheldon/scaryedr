@@ -2000,6 +2000,7 @@ dependencies = [
  "clap",
  "config",
  "env_logger",
+ "lazy_static",
  "libc",
  "log",
  "mpsc",

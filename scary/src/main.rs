@@ -1,9 +1,8 @@
+pub mod programs;
+
+use crate::programs::{get_ebpf_path, MapBuilder, ProgramBuilder};
 use aya::{
-    include_bytes_aligned,
-    maps::PerfEventArray,
-    programs::{KProbe, Lsm, TracePoint},
-    util::online_cpus,
-    Btf, Ebpf,
+    include_bytes_aligned, maps::PerfEventArray, programs::TracePoint, util::online_cpus, Ebpf,
 };
 use aya_log::EbpfLogger;
 use base64::{engine::general_purpose, Engine as _};
@@ -14,7 +13,7 @@ use config::{Config, File};
 use log::{debug, error, info, warn};
 use nix::sys::utsname::uname;
 use nix::unistd::User;
-use scary_ebpf_common::{Event, EventData, EVENT_DATA_ARGS};
+use scary_ebpf_common::{EventData, EVENT_DATA_ARGS};
 use scary_logger_plugins::s3::{S3Logger, S3LoggerConfig};
 use scary_userspace_common::logger::config::LoggerConfig;
 use scary_userspace_common::logger::LoggerPlugin;
@@ -22,7 +21,6 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_json::Value;
 use std::convert::TryFrom;
-use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +32,24 @@ use std::{
 use tokio::signal;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+
+lazy_static::lazy_static! {
+    static ref EXEC_ENTER: ProgramBuilder = ProgramBuilder::new(
+        "syscalls",
+        "sys_enter_execve",
+        "handle_exec",
+        "tracepoint",
+    );
+
+    static ref EXEC_EXIT: ProgramBuilder = ProgramBuilder::new(
+        "sched",
+        "sched_process_exec",
+        "handle_exec_exit",
+        "tracepoint",
+    );
+
+    static ref EVENTS_MAP: MapBuilder = MapBuilder::new("EVENTS");
+}
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -278,43 +294,6 @@ impl UserSpaceEventData {
     }
 }
 
-fn protocol_to_string(protocol: u16) -> String {
-    match protocol {
-        6 => "TCP".to_string(),
-        17 => "UDP".to_string(),
-        // Add more protocols as needed
-        _ => format!("Unknown ({})", protocol),
-    }
-}
-
-fn socket_type_to_string(socket_type: u16) -> String {
-    match socket_type {
-        1 => "SOCK_STREAM".to_string(),
-        2 => "SOCK_DGRAM".to_string(),
-        3 => "SOCK_RAW".to_string(),
-        // Add more socket types as needed
-        _ => format!("Unknown ({})", socket_type),
-    }
-}
-
-fn socket_state_to_string(socket_state: u8) -> String {
-    match socket_state {
-        1 => "TCP_ESTABLISHED".to_string(),
-        2 => "TCP_SYN_SENT".to_string(),
-        3 => "TCP_SYN_RECV".to_string(),
-        4 => "TCP_FIN_WAIT1".to_string(),
-        5 => "TCP_FIN_WAIT2".to_string(),
-        6 => "TCP_TIME_WAIT".to_string(),
-        7 => "TCP_CLOSE".to_string(),
-        8 => "TCP_CLOSE_WAIT".to_string(),
-        9 => "TCP_LAST_ACK".to_string(),
-        10 => "TCP_LISTEN".to_string(),
-        11 => "TCP_CLOSING".to_string(),
-        // Add more states as needed
-        _ => format!("Unknown ({})", socket_state),
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     tracing_subscriber::fmt::init();
@@ -369,7 +348,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 println!("IP blocking is now enabled",);
             }
             "2" => {
-                run_fim(&agent_config).await?;
+                todo!();
             }
             "3" => {
                 println!("🐝 Starting the process execution monitor... 🐝");
@@ -384,68 +363,12 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 }
 
-async fn run_fim(_config: &AgentConfig) -> Result<(), anyhow::Error> {
-    // Load the process execution eBPF program
-    let fim_ebpf = Box::leak(Box::new(Ebpf::load(include_bytes_aligned!(
-        "../../target/bpfel-unknown-none/release/scary-ebpf-file-lsm"
-    ))?));
-
-    if let Err(e) = EbpfLogger::init(fim_ebpf) {
-        warn!("failed to initialize eBPF logger for exec tracer: {}", e);
-    }
-
-    // Attach FIM program (LSM)
-    let fim_program: &mut Lsm = fim_ebpf
-        .program_mut("monitor_file_open")
-        .unwrap()
-        .try_into()?;
-
-    let btf = Btf::from_sys_fs()?;
-    fim_program.load("file_open", &btf)?;
-    fim_program.attach()?;
-
-    info!("🐝 Scary eBPF FIM is running 🎃. Waiting for Ctrl-C...");
-
-    let mut fim_perf_array = PerfEventArray::try_from(fim_ebpf.map_mut("EVENTS").unwrap())?;
-
-    for cpu_id in
-        online_cpus().map_err(|e| anyhow::anyhow!("Failed to get online CPUs: {:?}", e))?
-    {
-        let mut buf = fim_perf_array.open(cpu_id, None)?;
-
-        tokio::spawn(async move {
-            let mut buffers = vec![BytesMut::with_capacity(1024); 10];
-
-            loop {
-                let events = match buf.read_events(&mut buffers) {
-                    Ok(events) => events,
-                    Err(e) => {
-                        eprintln!("Error reading FIM events: {}", e);
-                        continue;
-                    }
-                };
-
-                for i in 0..events.read {
-                    let buf = &mut buffers[i];
-                    let ptr = buf.as_ptr() as *const Event;
-                    let _data = unsafe { ptr.read_unaligned() };
-                }
-            }
-        });
-    }
-
-    signal::ctrl_c().await?;
-    info!("Exiting FIM...");
-
-    Ok(())
-}
-
 async fn run_proc_exec(
     config: &AgentConfig,
     logger_config: &LoggerConfig,
 ) -> Result<(), anyhow::Error> {
     // Create a channel for sending events
-    let (tx, rx) = mpsc::channel(1000); // Adjust buffer size as needed
+    let (tx, rx) = mpsc::channel(1000);
 
     // Spawn a task to handle logging
     let logger = logger_config.logger.clone();
@@ -459,10 +382,9 @@ async fn run_proc_exec(
     // Vector to keep JoinHandles of per-CPU tasks
     let mut task_handles: Vec<JoinHandle<()>> = Vec::new();
 
-    // Load the process execution eBPF program
-    let ebpf = Box::leak(Box::new(Ebpf::load(include_bytes_aligned!(
-        "../../target/bpfel-unknown-none/release/scary-ebpf-process"
-    ))?));
+    // Load the process execution eBPF program and create a 'static reference
+    let ebpf_path = get_ebpf_path("scary-ebpf-process");
+    let ebpf = Box::leak(Box::new(Ebpf::load_file(ebpf_path)?));
 
     // Initialize eBPF loggers
     if config.logging {
@@ -471,14 +393,12 @@ async fn run_proc_exec(
         }
     }
 
-    // Attach process execution tracers
-    let exec_enter: &mut TracePoint = ebpf.program_mut("handle_exec").unwrap().try_into()?;
-    exec_enter.load()?;
-    exec_enter.attach("syscalls", "sys_enter_execve")?;
+    // Load and attach programs
+    EXEC_ENTER.load(ebpf)?;
+    EXEC_EXIT.load(ebpf)?;
 
-    let exec_exit: &mut TracePoint = ebpf.program_mut("handle_exec_exit").unwrap().try_into()?;
-    exec_exit.load()?;
-    exec_exit.attach("sched", "sched_process_exec")?;
+    // Load maps
+    EVENTS_MAP.load(ebpf)?;
 
     info!("🐝 Scary eBPF Process Execution Monitor is running 🎃. Waiting for Ctrl-C...");
 
