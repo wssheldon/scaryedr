@@ -241,7 +241,8 @@ fn read_arguments(ctx: &TracePointContext, data: &mut EventData) -> Result<u32, 
     let mut total_size = 0;
     let mut arg_count = 0;
 
-    for i in 0..MAXARGS {
+    // Skip the first argument (binary name)
+    for i in 1..MAXARGS {
         if total_size >= ARGSBUFFER - MAXARGLENGTH {
             info!(
                 ctx,
