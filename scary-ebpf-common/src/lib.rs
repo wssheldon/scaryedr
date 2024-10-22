@@ -60,7 +60,6 @@ pub struct Event {
     pub uid: u32,
     pub gid: u32,
     pub ppid: u32,
-    pub exec_id: [u8; 64],
     pub filename: [u8; FILENAME_SIZE],
     pub comm: [u8; COMM_SIZE],
     pub cwd: [u8; CWD_MAX],
@@ -69,6 +68,7 @@ pub struct Event {
     pub timestamp_ns: u64,
     pub flags: u32,
     pub args_size: u32,
+    pub exec_id: [u8; 64],
 }
 
 #[repr(C)]
@@ -84,7 +84,6 @@ impl Default for Event {
             uid: 0,
             gid: 0,
             ppid: 0,
-            exec_id: [0; 64],
             filename: [0; FILENAME_SIZE],
             comm: [0; COMM_SIZE],
             cwd: [0; CWD_MAX],
@@ -93,6 +92,7 @@ impl Default for Event {
             timestamp_ns: 0,
             flags: 0,
             args_size: 0,
+            exec_id: [0; 64],
         }
     }
 }

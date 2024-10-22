@@ -6,17 +6,18 @@ use aya_ebpf::cty::c_void;
 use aya_ebpf::{
     helpers::{
         bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_task,
-        bpf_get_current_uid_gid, bpf_ktime_get_ns, bpf_loop, bpf_probe_read_kernel,
-        bpf_probe_read_kernel_buf, bpf_probe_read_user, bpf_probe_read_user_str_bytes,
+        bpf_get_current_uid_gid, bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_loop,
+        bpf_probe_read_kernel, bpf_probe_read_kernel_buf, bpf_probe_read_user,
+        bpf_probe_read_user_str_bytes,
     },
-    macros::{btf_tracepoint, map, tracepoint},
-    maps::{PerCpuArray, PerCpuHashMap, PerfEventArray, ProgramArray},
-    programs::{ProbeContext, TracePointContext},
+    macros::{map, tracepoint},
+    maps::{PerCpuArray, PerCpuHashMap, PerfEventArray},
+    programs::TracePointContext,
     EbpfContext,
 };
 use aya_log_ebpf::info;
 use scary_ebpf_common::{
-    bindings::{dentry, fs_struct, mount, qstr, task_struct},
+    bindings::{dentry, task_struct},
     ArgBuffer, Event, EventData, SysEnterExecveArgs, ARGSBUFFER, COMM_SIZE, EVENT_DATA_ARGS,
     EVENT_ERROR_ARGS, EVENT_ERROR_CWD, MAXARGLENGTH, MAXARGS,
 };
@@ -33,11 +34,54 @@ static mut PROCESS_CACHE: PerCpuHashMap<u32, Event> = PerCpuHashMap::with_max_en
 #[map(name = "ARG_BUFFER")]
 static mut ARG_BUFFER: PerCpuArray<ArgBuffer> = PerCpuArray::with_max_entries(1, 0);
 
+#[tracepoint(name = "handle_exec_exit", category = "sched")]
+pub fn handle_exec_exit(ctx: TracePointContext) -> u32 {
+    match try_handle_exec_exit(&ctx) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[inline(always)]
+fn try_handle_exec_exit(ctx: &TracePointContext) -> Result<(), u32> {
+    let pid = bpf_get_current_pid_tgid() >> 32;
+
+    let data = unsafe {
+        match DATA_HEAP.get_ptr_mut(0) {
+            Some(ptr) => &mut *ptr,
+            None => return Err(1),
+        }
+    };
+
+    if data.event.pid != pid as u32 {
+        return Ok(());
+    }
+
+    // Update comm
+    if let Ok(current_comm) = bpf_get_current_comm() {
+        data.event.comm.copy_from_slice(&current_comm);
+    }
+
+    unsafe {
+        EVENTS.output(ctx, data, 0);
+    }
+
+    Ok(())
+}
+
 #[tracepoint(name = "handle_exec", category = "syscalls")]
 pub fn handle_exec(ctx: TracePointContext) -> u32 {
     match try_handle_exec(&ctx) {
         Ok(()) => 0,
         Err(_) => 1,
+    }
+}
+
+#[inline(always)]
+fn generate_exec_id(event: &mut Event) {
+    for i in (0..64).step_by(4) {
+        let random_bytes = unsafe { bpf_get_prandom_u32() }.to_le_bytes();
+        event.exec_id[i..i + 4].copy_from_slice(&random_bytes);
     }
 }
 
@@ -74,9 +118,11 @@ fn try_handle_exec(ctx: &TracePointContext) -> Result<(), u32> {
         }
     }
 
-    unsafe {
-        EVENTS.output(ctx, data, 0);
-    }
+    // Generate and set the exec_id
+    generate_exec_id(&mut data.event);
+
+    let pid = bpf_get_current_pid_tgid() >> 32;
+    data.event.pid = pid as u32;
 
     Ok(())
 }
