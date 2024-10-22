@@ -334,6 +334,7 @@ const MAX_NAME_LEN: usize = 32;
 /// from the current working directory up to the root, building the full path along the way.
 ///
 /// Kernel Directory Structure:
+///
 /// ```
 ///  +--------+     +--------+     +--------+
 ///  | dentry | --> | dentry | --> | dentry | --> ... --> (root)
@@ -345,6 +346,7 @@ const MAX_NAME_LEN: usize = 32;
 /// ```
 ///
 /// Path Construction Process:
+///
 /// 1. Start from the deepest dentry (current directory)
 /// 2. Read the name of the current dentry
 /// 3. Prepend the name to the path buffer
@@ -352,9 +354,10 @@ const MAX_NAME_LEN: usize = 32;
 /// 5. Repeat steps 2-4 until reaching the root
 ///
 /// Final Path Buffer:
+///
 /// ```
 /// +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-/// | / |dir1| / |dir2| / |file|   |   |   |   |   |   |   |   |   |
+/// | / |dir1| / |dir2| / |file|    |   |   |   |   |   |   |   |
 /// +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 /// ```
 #[inline(always)]
@@ -417,6 +420,7 @@ unsafe extern "C" fn _process_dentry(idx: u32, data: *mut c_void) -> i32 {
 /// up to the root, building the full path along the way.
 ///
 /// Kernel Structure and Path Traversal:
+///
 /// ```
 ///  +-------------+
 ///  | task_struct |
@@ -438,6 +442,7 @@ unsafe extern "C" fn _process_dentry(idx: u32, data: *mut c_void) -> i32 {
 /// ```
 ///
 /// Path Construction Process:
+///
 /// 1. Initialize the buffer with a root slash '/'
 /// 2. Retrieve the current task's fs_struct
 /// 3. Get the pwd (present working directory) dentry from fs_struct
@@ -446,9 +451,10 @@ unsafe extern "C" fn _process_dentry(idx: u32, data: *mut c_void) -> i32 {
 /// 6. Continue until reaching the root directory
 ///
 /// Final Path Buffer:
+///
 /// ```
 /// +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
-/// | / |dir1| / |dir2| / |file|   |   |   |   |   |   |   |   |   |
+/// | / |dir1| / |dir2| / |file|    |   |   |   |   |   |   |   |
 /// +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 /// ```
 ///
