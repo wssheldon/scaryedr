@@ -15,3 +15,6 @@ scary-ebpf-common = { path = "../scary-ebpf-common" }
 [[bin]]
 name = "scary-ebpf-process"
 path = "src/main.rs"
+
+[build]
+rustflags = "-C debuginfo=2 -C link-arg=--btf"

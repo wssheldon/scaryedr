@@ -33,7 +33,7 @@ log = { version = "0.4.22", default-features = false }
 tokio = { version = "1.40.0", default-features = false }
 
 [profile.dev]
-opt-level = 3
+opt-level = 1
 debug = false
 overflow-checks = false
 lto = true

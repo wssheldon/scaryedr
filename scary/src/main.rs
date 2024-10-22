@@ -1,27 +1,32 @@
 use aya::{
     include_bytes_aligned,
     maps::PerfEventArray,
-    programs::{Lsm, TracePoint},
+    programs::{KProbe, Lsm, TracePoint},
     util::online_cpus,
     Btf, Ebpf,
 };
 use aya_log::EbpfLogger;
 use bytes::BytesMut;
+use chrono::{DateTime, Utc};
 use clap::Parser;
 use config::{Config, File};
 use log::{debug, error, info, warn};
 use nix::sys::utsname::uname;
 use nix::unistd::User;
+use scary_ebpf_common::{Event, EventData, EVENT_DATA_ARGS};
 use scary_logger_plugins::s3::{S3Logger, S3LoggerConfig};
 use scary_userspace_common::logger::config::LoggerConfig;
 use scary_userspace_common::logger::LoggerPlugin;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_json::Value;
+use std::convert::TryFrom;
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{
+    fs,
     io::{self, Write},
     str,
 };
@@ -49,28 +54,34 @@ impl Default for AgentConfig {
     }
 }
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-struct Event {
-    pid: u32,
-    tid: u32,
-    uid: u32,
-    gid: u32,
-    ppid: u32,
-    filename: [u8; 256],
-    comm: [u8; 16],
-    filename_read_result: i64,
+fn get_boot_time() -> Option<u64> {
+    // Read the system boot time from /proc/uptime
+    if let Ok(contents) = fs::read_to_string("/proc/uptime") {
+        let uptime_secs: f64 = contents
+            .split_whitespace()
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .ok()?;
+        let boot_time = Utc::now().timestamp() as u64 - uptime_secs as u64;
+        return Some(boot_time * 1_000_000_000);
+    }
+    None
 }
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-struct EventData {
-    event: Event,
-    args: [[u8; 64]; 10], // Updated to match the eBPF struct (MAX_ARGS = 10)
-    args_read_result: i32,
+struct UserSpaceEventData(EventData);
+
+#[derive(Debug, Serialize, Deserialize)]
+struct NetworkConnectionJson {
+    local_addr: String,
+    local_port: u16,
+    remote_addr: String,
+    remote_port: u16,
+    protocol: String,
+    socket_type: String,
+    socket_state: String,
 }
 
-// Define structs for JSON serialization
 #[derive(Debug, Serialize, Deserialize)]
 struct EventJson {
     pid: u32,
@@ -79,58 +90,146 @@ struct EventJson {
     uid: u32,
     gid: u32,
     comm: String,
+    cwd: String,
     filename: String,
     args: Vec<String>,
     username: String,
     hostname: String,
+    timestamp: String,
+    // network_connections: Vec<NetworkConnectionJson>,
 }
 
-impl EventData {
+impl UserSpaceEventData {
     fn to_json(&self) -> EventJson {
         EventJson {
             hostname: Self::get_hostname(),
-            pid: self.event.pid,
-            ppid: self.event.ppid,
-            tid: self.event.tid,
-            uid: self.event.uid,
-            gid: self.event.gid,
+            pid: self.0.event.pid,
+            ppid: self.0.event.ppid,
+            tid: self.0.event.tid,
+            uid: self.0.event.uid,
+            gid: self.0.event.gid,
             comm: self.get_comm(),
             filename: self.get_filename(),
+            cwd: self.get_cwd(),
             args: self.get_args(),
             username: self.get_username(),
+            timestamp: Self::format_timestamp(self.0.event.timestamp_ns),
+            // network_connections: self.get_network_connections(),
         }
     }
 
+    fn format_timestamp(timestamp_ns: u64) -> String {
+        if let Some(boot_time_ns) = get_boot_time() {
+            let real_timestamp_ns = boot_time_ns + timestamp_ns;
+
+            match i64::try_from(real_timestamp_ns) {
+                Ok(timestamp_ns_i64) => {
+                    let datetime = DateTime::<Utc>::from_timestamp_nanos(timestamp_ns_i64);
+                    return datetime.to_rfc3339();
+                }
+                Err(_) => return "<invalid timestamp>".to_string(),
+            }
+        }
+        "<invalid timestamp>".to_string()
+    }
+
     fn get_comm(&self) -> String {
-        str::from_utf8(&self.event.comm)
+        println!("Debug: Raw comm bytes: {:?}", &self.0.event.comm);
+        let comm_str = str::from_utf8(&self.0.event.comm)
+            .map(|s| {
+                let trimmed = s.trim_end_matches('\0');
+                println!("Debug: Trimmed comm string: {:?}", trimmed);
+                trimmed.to_string()
+            })
+            .unwrap_or_else(|e| {
+                println!("Debug: UTF-8 conversion error: {:?}", e);
+                "<invalid utf8>".to_string()
+            });
+        println!("Debug: Final comm string: {:?}", comm_str);
+        comm_str
+    }
+
+    fn get_filename(&self) -> String {
+        str::from_utf8(&self.0.event.filename)
             .map(|s| s.trim_end_matches('\0').to_string())
             .unwrap_or_else(|_| "<invalid utf8>".to_string())
     }
 
-    fn get_filename(&self) -> String {
-        str::from_utf8(&self.event.filename)
-            .map(|s| s.trim_end_matches('\0').to_string())
-            .unwrap_or_else(|_| "<invalid utf8>".to_string())
+    fn get_cwd(&self) -> String {
+        let cwd_len = self.0.event.cwd_len as usize;
+        println!("Debug: CWD raw bytes: {:?}", &self.0.event.cwd[..cwd_len]);
+        println!("Debug: CWD length: {}", cwd_len);
+
+        // Convert the raw bytes into a string
+        let raw_cwd = match str::from_utf8(&self.0.event.cwd[..cwd_len]) {
+            Ok(s) => s.to_string(),
+            Err(e) => {
+                println!("Debug: UTF-8 conversion error: {:?}", e);
+                return "<invalid utf8>".to_string();
+            }
+        };
+
+        println!("Debug: Raw CWD string: {:?}", raw_cwd);
+
+        // Split the path into components
+        let components: Vec<&str> = raw_cwd.split('/').filter(|s| !s.is_empty()).collect();
+
+        // Reverse the components to get the correct order
+        let mut reversed_components = components;
+        reversed_components.reverse();
+
+        // Join the components back into a path
+        let reversed_cwd = format!("/{}", reversed_components.join("/"));
+
+        println!("Debug: Reversed CWD string: {:?}", reversed_cwd);
+
+        reversed_cwd
     }
 
     fn get_args(&self) -> Vec<String> {
         let mut args = Vec::new();
-        let mut total_len = 0;
-        for arg in &self.args {
-            if total_len >= self.args_read_result as usize {
-                break;
-            }
-            if let Ok(s) = str::from_utf8(arg) {
-                let trimmed = s.trim_end_matches('\0');
-                if trimmed.is_empty() {
-                    break;
+        let total_size = self.0.args_read_result as usize;
+        let args_data = &self.0.args[..total_size];
+        println!("Debug: args_data {:?}", args_data);
+        println!("Debug: total_size {:?}", total_size);
+
+        let mut start = 0;
+        while start < total_size {
+            // Find the end of the current argument (null byte or end of data)
+            let end = args_data[start..]
+                .iter()
+                .position(|&x| x == b'\0')
+                .unwrap_or(total_size - start);
+
+            let arg_bytes = &args_data[start..start + end];
+            println!("Debug: Arg bytes: {:?}", arg_bytes);
+
+            if let Ok(s) = std::str::from_utf8(arg_bytes) {
+                if !s.is_empty() {
+                    println!("We have some data: {}", s);
+                    args.push(s.to_string());
+                } else {
+                    println!("The data is empty");
                 }
-                total_len += trimmed.len() + 1; // +1 for null terminator
-                args.push(trimmed.to_string());
-            } else {
-                break;
+            }
+
+            // Move to the next argument
+            start += end + 1;
+            // Skip the null byte
+            if start < total_size && args_data[start] == b'\0' {
+                start += 1;
             }
         }
+
+        println!("Debug: Found {} arguments", args.len());
+        for (i, arg) in args.iter().enumerate() {
+            println!("Debug: Arg {}: {}", i, arg);
+        }
+
+        if (self.0.event.flags & EVENT_DATA_ARGS) != 0 {
+            println!("Debug: More arguments might be available but not captured");
+        }
+
         args
     }
 
@@ -161,13 +260,50 @@ impl EventData {
     ///
     /// See `getpwuid_r(3)` man page for more details.
     fn get_username(&self) -> String {
-        User::from_uid(nix::unistd::Uid::from_raw(self.event.uid))
+        User::from_uid(nix::unistd::Uid::from_raw(self.0.event.uid))
             .map(|user_opt| {
                 user_opt
                     .map(|user| user.name)
-                    .unwrap_or_else(|| format!("uid:{}", self.event.uid))
+                    .unwrap_or_else(|| format!("uid:{}", self.0.event.uid))
             })
-            .unwrap_or_else(|_| format!("uid:{}", self.event.uid))
+            .unwrap_or_else(|_| format!("uid:{}", self.0.event.uid))
+    }
+}
+
+fn protocol_to_string(protocol: u16) -> String {
+    match protocol {
+        6 => "TCP".to_string(),
+        17 => "UDP".to_string(),
+        // Add more protocols as needed
+        _ => format!("Unknown ({})", protocol),
+    }
+}
+
+fn socket_type_to_string(socket_type: u16) -> String {
+    match socket_type {
+        1 => "SOCK_STREAM".to_string(),
+        2 => "SOCK_DGRAM".to_string(),
+        3 => "SOCK_RAW".to_string(),
+        // Add more socket types as needed
+        _ => format!("Unknown ({})", socket_type),
+    }
+}
+
+fn socket_state_to_string(socket_state: u8) -> String {
+    match socket_state {
+        1 => "TCP_ESTABLISHED".to_string(),
+        2 => "TCP_SYN_SENT".to_string(),
+        3 => "TCP_SYN_RECV".to_string(),
+        4 => "TCP_FIN_WAIT1".to_string(),
+        5 => "TCP_FIN_WAIT2".to_string(),
+        6 => "TCP_TIME_WAIT".to_string(),
+        7 => "TCP_CLOSE".to_string(),
+        8 => "TCP_CLOSE_WAIT".to_string(),
+        9 => "TCP_LAST_ACK".to_string(),
+        10 => "TCP_LISTEN".to_string(),
+        11 => "TCP_CLOSING".to_string(),
+        // Add more states as needed
+        _ => format!("Unknown ({})", socket_state),
     }
 }
 
@@ -233,8 +369,6 @@ async fn main() -> Result<(), anyhow::Error> {
             }
             "4" => {
                 println!("🐝 Thanks for using Scary eBPF! Goodbye! 🐝");
-                // Before exiting, signal the background flush task to shutdown
-                // s3_logger.trigger_shutdown();
                 return Ok(());
             }
             _ => println!("Invalid option, please try again."),
@@ -286,39 +420,7 @@ async fn run_fim(_config: &AgentConfig) -> Result<(), anyhow::Error> {
                 for i in 0..events.read {
                     let buf = &mut buffers[i];
                     let ptr = buf.as_ptr() as *const Event;
-                    let data = unsafe { ptr.read_unaligned() };
-
-                    // Convert comm to String
-                    let comm = match str::from_utf8(&data.comm) {
-                        Ok(s) => s.trim_end_matches('\0').to_string(),
-                        Err(_) => "<invalid utf8>".to_string(),
-                    };
-
-                    // Create the JSON object for the FIM event
-                    let event_json = EventJson {
-                        hostname: "".to_string(),
-                        pid: data.pid,
-                        ppid: 0,
-                        tid: 0,
-                        uid: data.uid,
-                        gid: data.gid,
-                        comm,
-                        filename: format!("inode"),
-                        args: vec![],
-                        username: User::from_uid(nix::unistd::Uid::from_raw(data.uid))
-                            .map(|user_opt| {
-                                user_opt
-                                    .map(|user| user.name)
-                                    .unwrap_or_else(|| format!("uid:{}", data.uid))
-                            })
-                            .unwrap_or_else(|_| format!("uid:{}", data.uid)),
-                    };
-
-                    // Serialize to JSON string and print
-                    match serde_json::to_string(&event_json) {
-                        Ok(json_str) => println!("{}", json_str),
-                        Err(e) => eprintln!("Error serializing FIM event to JSON: {}", e),
-                    }
+                    let _data = unsafe { ptr.read_unaligned() };
                 }
             }
         });
@@ -366,6 +468,11 @@ async fn run_proc_exec(
     exec_trace.load()?;
     exec_trace.attach("syscalls", "sys_enter_execve")?;
 
+    // Attach tcp_connect kprobe
+    // let tcp_connect: &mut KProbe = ebpf.program_mut("tcp_connect").unwrap().try_into()?;
+    // tcp_connect.load()?;
+    // tcp_connect.attach("tcp_connect", 0)?;
+
     info!("🐝 Scary eBPF Process Execution Monitor is running 🎃. Waiting for Ctrl-C...");
 
     let mut perf_array = PerfEventArray::try_from(ebpf.map_mut("EVENTS").unwrap())?;
@@ -400,7 +507,8 @@ async fn run_proc_exec(
                     let data = unsafe { ptr.read_unaligned() };
 
                     // Process event and create EventJson...
-                    let event_json = data.to_json();
+                    let event_data = UserSpaceEventData(data);
+                    let event_json = event_data.to_json();
 
                     // Serialize to pretty-printed JSON string
                     match serde_json::to_string_pretty(&event_json) {
@@ -448,6 +556,10 @@ async fn run_proc_exec(
 
 async fn handle_logging(mut rx: mpsc::Receiver<EventJson>, logger: Arc<dyn LoggerPlugin>) {
     while let Some(event_json) = rx.recv().await {
+        println!("Debug: Received event for PID: {}", event_json.pid);
+        println!("Debug: Command: {}", event_json.comm);
+        println!("Debug: Arguments: {:?}", event_json.args);
+
         let json_value: Value = match serde_json::to_value(event_json) {
             Ok(value) => value,
             Err(e) => {
