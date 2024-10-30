@@ -4,19 +4,21 @@
 🐝 Starting the process execution monitor... 🐝
 
 {
-  "pid": 162137,
-  "ppid": 1175,
-  "tid": 162137,
+  "exec_id": "d8nPtgBlxzQhnjFFLh4/hs8MU8lcyaQ7hP5ePGNg7BcqHUjOk7s7o8ppksP0VrkajvcOyTAxbWnOe8ZEYO5xJQ==",
+  "pid": 493853,
+  "ppid": 493844,
+  "tid": 493853,
   "uid": 0,
   "gid": 0,
-  "comm": "bash",
-  "filename": "/usr/bin/cat",
+  "comm": "cat",
+  "cwd": "/root/Projects/scary",
+  "binary": "/usr/bin/cat",
   "args": [
-    "cat",
     "/root/.ssh/authorized_keys"
   ],
   "username": "root",
-  "hostname": "ubuntu-32gb-hil-1"
+  "hostname": "ubuntu-32gb-hil-1",
+  "timestamp": "2024-10-30T02:04:36.080166068+00:00"
 }
 
 2024-10-16T00:58:32.823465Z  INFO scary_logger_plugins::s3: Flushing 1 events to S3
