@@ -32,14 +32,14 @@ pub static mut EVENTS: PerfEventByteArray = PerfEventByteArray::new(0);
 /// - Event data must be properly aligned and sized
 /// - Caller must ensure no other references to EVENTS exist
 #[inline(always)]
-pub unsafe fn send<C, T>(ctx: &C, event: &Event<T>)
+pub fn send<C, T>(ctx: &C, event: &Event<T>)
 where
     C: EbpfContext,
-    T: FromBytes + IntoBytes + Clone,
+    T: Clone,
 {
     // Get a raw pointer using &raw mut to avoid reference creation
     let events_ptr = &raw mut EVENTS;
 
     // Use the raw pointer directly
-    (*events_ptr).output(ctx, event.as_bytes(), 0);
+    unsafe { (*events_ptr).output(ctx, event.as_bytes(), 0) };
 }

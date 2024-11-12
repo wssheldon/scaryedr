@@ -15,7 +15,8 @@ use chrono::{DateTime, Utc};
 use clap::Parser;
 use config::{Config, File};
 use ebpf::events::{
-    connect::{ConnectData, ConnectEvent, IpAddr},
+    connect::{ConnectData, ConnectEvent},
+    socket::IpAddr,
     Event, Type as EventType,
 };
 use log::{debug, error, info, warn};
@@ -477,6 +478,17 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 }
 
+#[derive(Debug)]
+struct TaskInfoValues {
+    pid: u32,
+    tid: u32,
+    ppid: u32,
+    uid: u32,
+    gid: u32,
+    start_time: u64,
+    comm: String,
+}
+
 async fn run_proc_exec(
     config: &AgentConfig,
     logger_config: &LoggerConfig,
@@ -680,30 +692,50 @@ async fn run_proc_exec(
 
                         let src_addr = unsafe {
                             [
-                                ptr::read_unaligned(&event.data.src_addr.addr[0]),
-                                ptr::read_unaligned(&event.data.src_addr.addr[1]),
-                                ptr::read_unaligned(&event.data.src_addr.addr[2]),
-                                ptr::read_unaligned(&event.data.src_addr.addr[3]),
+                                ptr::read_unaligned(&event.data.socket.src_addr.addr[0]),
+                                ptr::read_unaligned(&event.data.socket.src_addr.addr[1]),
+                                ptr::read_unaligned(&event.data.socket.src_addr.addr[2]),
+                                ptr::read_unaligned(&event.data.socket.src_addr.addr[3]),
                             ]
                         };
 
                         let dst_addr = unsafe {
                             [
-                                ptr::read_unaligned(&event.data.dst_addr.addr[0]),
-                                ptr::read_unaligned(&event.data.dst_addr.addr[1]),
-                                ptr::read_unaligned(&event.data.dst_addr.addr[2]),
-                                ptr::read_unaligned(&event.data.dst_addr.addr[3]),
+                                ptr::read_unaligned(&event.data.socket.dst_addr.addr[0]),
+                                ptr::read_unaligned(&event.data.socket.dst_addr.addr[1]),
+                                ptr::read_unaligned(&event.data.socket.dst_addr.addr[2]),
+                                ptr::read_unaligned(&event.data.socket.dst_addr.addr[3]),
                             ]
                         };
 
+                        // Get task info
+                        let task_info = unsafe {
+                            let task_info = &event.header.task_info;
+                            TaskInfoValues {
+                                pid: ptr::read_unaligned(&task_info.pid),
+                                tid: ptr::read_unaligned(&task_info.tid),
+                                ppid: ptr::read_unaligned(&task_info.ppid),
+                                uid: ptr::read_unaligned(&task_info.uid),
+                                gid: ptr::read_unaligned(&task_info.gid),
+                                start_time: ptr::read_unaligned(&task_info.start_time),
+                                comm: {
+                                    let mut comm = [0u8; 16];
+                                    for (i, byte) in comm.iter_mut().enumerate() {
+                                        *byte = ptr::read_unaligned(&task_info.comm[i]);
+                                    }
+                                    String::from_utf8_lossy(&comm)
+                                        .trim_matches('\0')
+                                        .to_string()
+                                },
+                            }
+                        };
+
                         // Get other values
-                        let socket_fd = unsafe { ptr::read_unaligned(&event.data.sock_fd) };
-                        let proto = unsafe { ptr::read_unaligned(&event.data.proto) };
-                        let src_port = unsafe { ptr::read_unaligned(&event.data.src_port) };
-                        let dst_port = unsafe { ptr::read_unaligned(&event.data.dst_port) };
+                        let socket_fd = unsafe { ptr::read_unaligned(&event.data.socket.sock_fd) };
+                        let proto = unsafe { ptr::read_unaligned(&event.data.socket.proto) };
+                        let src_port = unsafe { ptr::read_unaligned(&event.data.socket.src_port) };
+                        let dst_port = unsafe { ptr::read_unaligned(&event.data.socket.dst_port) };
                         let connected = unsafe { ptr::read_unaligned(&event.data.connected) };
-                        let pid = unsafe { ptr::read_unaligned(&event.header.pid) };
-                        let tid = unsafe { ptr::read_unaligned(&event.header.tid) };
                         let timestamp = unsafe { ptr::read_unaligned(&event.header.timestamp) };
 
                         // Convert event to JSON using local variables
@@ -713,8 +745,13 @@ async fn run_proc_exec(
                                 "type": "connect",
                                 "timestamp": timestamp,
                                 "process": {
-                                    "pid": pid,
-                                    "tid": tid
+                                    "pid": task_info.pid,
+                                    "tid": task_info.tid,
+                                    "ppid": task_info.ppid,
+                                    "uid": task_info.uid,
+                                    "gid": task_info.gid,
+                                    "start_time": task_info.start_time,
+                                    "comm": task_info.comm,
                                 }
                             },
                             "connection": {

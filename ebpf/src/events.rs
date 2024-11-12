@@ -1,8 +1,14 @@
 pub mod connect;
+pub mod execve;
+pub mod listen;
+pub mod socket;
 
-use aya_ebpf::helpers::bpf_get_prandom_u32;
+use aya_ebpf::helpers::{
+    bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_task, bpf_get_current_uid_gid,
+    bpf_get_prandom_u32, bpf_ktime_get_ns, bpf_probe_read_kernel,
+};
 use core::mem::MaybeUninit;
-use zerocopy::{FromBytes, IntoBytes};
+use scary_ebpf_common::bindings::task_struct;
 
 #[derive(Clone, Copy, Debug)]
 #[repr(u32)]
@@ -12,8 +18,58 @@ pub enum Type {
     File = 2,
 }
 
-#[derive(Clone, Copy, Debug, FromBytes, IntoBytes)]
-#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct TaskInfo {
+    pub pid: u32,
+    pub tid: u32,
+    pub ppid: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub start_time: u64,
+    pub comm: [u8; 16],
+    pub _pad: [u8; 4],
+}
+
+impl TaskInfo {
+    #[inline(always)]
+    pub fn from_current() -> Self {
+        let pid_tgid = bpf_get_current_pid_tgid();
+        let uid_gid = bpf_get_current_uid_gid();
+
+        let mut info = Self {
+            pid: (pid_tgid >> 32) as u32,
+            tid: pid_tgid as u32,
+            ppid: 0, // Set below
+            uid: uid_gid as u32,
+            gid: (uid_gid >> 32) as u32,
+            start_time: unsafe { bpf_ktime_get_ns() },
+            comm: [0; 16],
+            _pad: [0; 4],
+        };
+
+        // Get command name
+        if let Ok(current_comm) = bpf_get_current_comm() {
+            info.comm.copy_from_slice(&current_comm);
+        }
+
+        // Get parent PID
+        // TODO(wshel)
+        // let task = unsafe { bpf_get_current_task() as *const task_struct };
+        // unsafe {
+        //     let parent = bpf_probe_read_kernel(&(*task).parent).map_err(|e| e);
+        //     let ppid = bpf_probe_read_kernel(&(parent).tgid).map_err(|e| e);
+        //     // info.ppid = 0;
+        // }
+
+        info.ppid = 0;
+
+        info
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct Uuid {
     pub data: [u64; 2],
 }
@@ -96,13 +152,12 @@ impl Uuid {
 /// - pid/tid:    4-byte aligned (packed together)
 /// - type/pad:   4-byte aligned (packed together)
 /// ```
-#[derive(Clone, Copy, Debug, FromBytes, IntoBytes)]
-#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct Header {
-    pub uuid: Uuid,      // 16 bytes, 8-byte aligned
-    pub timestamp: u64,  // 8 bytes
-    pub pid: u32,        // 4 bytes
-    pub tid: u32,        // 4 bytes
+    pub uuid: Uuid,     // 16 bytes, 8-byte aligned
+    pub timestamp: u64, // 8 bytes
+    pub task_info: TaskInfo,
     pub event_type: u32, // 4 bytes
     _pad: u32,           // 4 bytes padding
 } // Total: 40 bytes, optimally aligned
@@ -115,18 +170,12 @@ const _: () = {
 
 #[derive(Clone)]
 #[repr(C, align(8))]
-pub struct Event<T>
-where
-    T: FromBytes + IntoBytes + Clone + 'static,
-{
+pub struct Event<T: Clone + 'static> {
     pub header: Header,
     pub data: T,
 }
 
-impl<T> Event<T>
-where
-    T: FromBytes + IntoBytes + Clone + 'static,
-{
+impl<T: Clone + 'static> Event<T> {
     /// Creates a new event with process information.
     ///
     /// PID/TID Extraction:
@@ -143,21 +192,13 @@ where
     /// 2. Shift PID:    >> 32
     /// 3. Mask TID:     pid_tgid & 0x00000000FFFFFFFF
     /// ```
-    #[inline]
+    #[inline(always)]
     pub fn new(event_type: Type, data: T) -> Self {
-        use aya_ebpf::helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns};
-
-        let pid_tgid = bpf_get_current_pid_tgid();
-        // Use const offsets for better BPF verifier handling
-        const PID_SHIFT: u32 = 32;
-        const PID_MASK: u64 = 0xFFFFFFFF00000000;
-
         Self {
             header: Header {
                 uuid: Uuid::generate(),
                 timestamp: unsafe { bpf_ktime_get_ns() },
-                pid: ((pid_tgid & PID_MASK) >> PID_SHIFT) as u32,
-                tid: pid_tgid as u32,
+                task_info: TaskInfo::from_current(),
                 event_type: event_type as u32,
                 _pad: 0,
             },
