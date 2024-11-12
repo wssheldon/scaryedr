@@ -1,6 +1,8 @@
 # scary
 
-![eBPF](docs/assets/ebpf.png)
+<p align="center">
+  <img src="docs/assets/ebpf.png" width="20%" />
+</p>
 
 ```bash
 🐝 Starting the process execution monitor... 🐝
