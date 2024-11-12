@@ -2,7 +2,11 @@ pub mod programs;
 
 use crate::programs::{get_ebpf_path, MapBuilder, ProgramBuilder};
 use aya::{
-    include_bytes_aligned, maps::PerfEventArray, programs::TracePoint, util::online_cpus, Ebpf,
+    include_bytes_aligned,
+    maps::{HashMap, MapData, PerfEventArray},
+    programs::{KProbe, SocketFilter, TracePoint, Xdp, XdpFlags},
+    util::online_cpus,
+    Ebpf,
 };
 use aya_log::EbpfLogger;
 use base64::{engine::general_purpose, Engine as _};
@@ -10,6 +14,10 @@ use bytes::BytesMut;
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use config::{Config, File};
+use ebpf::events::{
+    connect::{ConnectData, ConnectEvent, IpAddr},
+    Event, Type as EventType,
+};
 use log::{debug, error, info, warn};
 use nix::sys::utsname::uname;
 use nix::unistd::User;
@@ -19,14 +27,18 @@ use scary_userspace_common::logger::config::LoggerConfig;
 use scary_userspace_common::logger::LoggerPlugin;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::hash_map::DefaultHasher;
 use std::convert::TryFrom;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{
     fs,
     io::{self, Write},
+    os::unix::fs::MetadataExt,
+    path::Path,
     str,
 };
 use tokio::signal;
@@ -48,7 +60,21 @@ lazy_static::lazy_static! {
         "tracepoint",
     );
 
-    static ref EVENTS_MAP: MapBuilder = MapBuilder::new("EVENTS");
+    // static ref EVENTS_MAP: MapBuilder = MapBuilder::new("EVENTS");
+
+    // static ref CONNECT_PROBE: ProgramBuilder = ProgramBuilder::new(
+    //     "kprobe",
+    //     "__sys_connect",
+    //     "net_enter_sys_connect",
+    //     "kprobe",
+    // );
+
+    // static ref CONNECT_RETPROBE: ProgramBuilder = ProgramBuilder::new(
+    //     "kretprobe",
+    //     "__sys_connect",
+    //     "net_exit_sys_connect",
+    //     "kretprobe",
+    // );
 }
 
 #[derive(Debug, Parser)]
@@ -89,15 +115,104 @@ fn get_boot_time() -> Option<u64> {
 struct UserSpaceEventData(EventData);
 
 #[derive(Debug, Serialize, Deserialize)]
-struct NetworkConnectionJson {
-    local_addr: String,
-    local_port: u16,
-    remote_addr: String,
-    remote_port: u16,
-    protocol: String,
-    socket_type: String,
-    socket_state: String,
+struct NetworkEventJson {
+    event_type: String,
+    pid: u32,
+    uid: u32,
+    gid: u32,
+    comm: String,
+    socket_fd: i32,
+    addr: Option<String>,  // For IPv4 address
+    port: Option<u16>,     // For port number
+    protocol: Option<u16>, // For protocol type
+    username: String,
+    hostname: String,
+    timestamp: String,
 }
+
+// Create an enum to handle different event types
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum EventJsonType {
+    Process(EventJson),
+    Network(NetworkEventJson),
+}
+
+fn get_username(uid: u32) -> String {
+    User::from_uid(nix::unistd::Uid::from_raw(uid))
+        .map(|user_opt| {
+            user_opt
+                .map(|user| user.name)
+                .unwrap_or_else(|| format!("uid:{}", uid))
+        })
+        .unwrap_or_else(|_| format!("uid:{}", uid))
+}
+
+fn get_hostname() -> String {
+    uname()
+        .map(|info| info.nodename().to_string_lossy().into_owned())
+        .unwrap_or_else(|_| String::from("unknown"))
+}
+
+fn format_timestamp(timestamp_ns: u64) -> String {
+    if let Some(boot_time_ns) = get_boot_time() {
+        let real_timestamp_ns = boot_time_ns + timestamp_ns;
+
+        match i64::try_from(real_timestamp_ns) {
+            Ok(timestamp_ns_i64) => {
+                let datetime = DateTime::<Utc>::from_timestamp_nanos(timestamp_ns_i64);
+                return datetime.to_rfc3339();
+            }
+            Err(_) => return "<invalid timestamp>".to_string(),
+        }
+    }
+    "<invalid timestamp>".to_string()
+}
+
+// fn convert_to_network_json(event: &Event) -> NetworkEventJson {
+//     println!("Debug: Converting network event to JSON");
+//     println!("Debug: Event type: {:?}", event.event_type);
+
+//     let addr_string = unsafe {
+//         match event.event_type {
+//             EventType::NetworkConnect | EventType::NetworkBind => {
+//                 let network_data = &event.payload.network;
+//                 println!(
+//                     "Debug: Network data - addr: {}, port: {}",
+//                     network_data.addr, network_data.port
+//                 );
+//                 Some(format!(
+//                     "{}.{}.{}.{}",
+//                     (network_data.addr >> 24) & 0xff,
+//                     (network_data.addr >> 16) & 0xff,
+//                     (network_data.addr >> 8) & 0xff,
+//                     network_data.addr & 0xff
+//                 ))
+//             }
+//             _ => None,
+//         }
+//     };
+
+//     let json = NetworkEventJson {
+//         event_type: format!("{:#?}", event.event_type),
+//         pid: event.task_info.pid,
+//         uid: event.task_info.uid,
+//         gid: event.task_info.gid,
+//         comm: String::from_utf8_lossy(&event.task_info.comm)
+//             .trim_end_matches('\0')
+//             .to_string(),
+//         socket_fd: unsafe { event.payload.network.sock_fd },
+//         addr: addr_string,
+//         port: unsafe { Some(event.payload.network.port) },
+//         protocol: unsafe { Some(event.payload.network.proto) },
+//         username: get_username(event.task_info.uid),
+//         hostname: get_hostname(),
+//         timestamp: format_timestamp(event.timestamp),
+//     };
+
+//     println!("Debug: Created network JSON event");
+//     json
+// }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EventJson {
@@ -114,7 +229,6 @@ struct EventJson {
     username: String,
     hostname: String,
     timestamp: String,
-    // network_connections: Vec<NetworkConnectionJson>,
 }
 
 impl UserSpaceEventData {
@@ -368,7 +482,7 @@ async fn run_proc_exec(
     logger_config: &LoggerConfig,
 ) -> Result<(), anyhow::Error> {
     // Create a channel for sending events
-    let (tx, rx) = mpsc::channel(1000);
+    let (tx, rx) = mpsc::channel::<EventJsonType>(1000);
 
     // Spawn a task to handle logging
     let logger = logger_config.logger.clone();
@@ -382,32 +496,136 @@ async fn run_proc_exec(
     // Vector to keep JoinHandles of per-CPU tasks
     let mut task_handles: Vec<JoinHandle<()>> = Vec::new();
 
-    // Load the process execution eBPF program and create a 'static reference
-    let ebpf_path = get_ebpf_path("scary-ebpf-process");
-    let ebpf = Box::leak(Box::new(Ebpf::load_file(ebpf_path)?));
+    // Load both process and network monitoring programs
+    let ebpf_path = get_ebpf_path("ebpf");
+    let proc_ebpf_path = get_ebpf_path("scary-ebpf-process");
+    // let net_ebpf_path = get_ebpf_path("scary-ebpf-net");
+    let file_ebpf_path = get_ebpf_path("scary-ebpf-file");
+
+    let bpf = Box::leak(Box::new(Ebpf::load_file(ebpf_path)?));
+    let proc_bpf = Box::leak(Box::new(Ebpf::load_file(proc_ebpf_path)?));
+    // let net_bpf = Box::leak(Box::new(Ebpf::load_file(net_ebpf_path)?));
+    let file_bpf = Box::leak(Box::new(Ebpf::load_file(file_ebpf_path)?));
 
     // Initialize eBPF loggers
     if config.logging {
-        if let Err(e) = EbpfLogger::init(ebpf) {
+        if let Err(e) = EbpfLogger::init(bpf) {
+            warn!("failed to initialize eBPF logger: {}", e);
+        }
+        if let Err(e) = EbpfLogger::init(proc_bpf) {
             warn!("failed to initialize eBPF logger for exec tracer: {}", e);
+        }
+        // if let Err(e) = EbpfLogger::init(net_bpf) {
+        //     warn!(
+        //         "failed to initialize eBPF logger for network monitor: {}",
+        //         e
+        //     );
+        // }
+        if let Err(e) = EbpfLogger::init(file_bpf) {
+            warn!("failed to initialize eBPF logger for file monitor: {}", e);
         }
     }
 
-    // Load and attach programs
-    EXEC_ENTER.load(ebpf)?;
-    EXEC_EXIT.load(ebpf)?;
+    // Load and attach process monitoring programs
+    EXEC_ENTER.load(proc_bpf)?;
+    EXEC_EXIT.load(proc_bpf)?;
 
-    // Load maps
-    EVENTS_MAP.load(ebpf)?;
+    // Load and attach network monitoring programs
+    // CONNECT_PROBE.load(bpf)?;
+    // CONNECT_RETPROBE.load(bpf)?;
 
-    info!("🐝 Scary eBPF Process Execution Monitor is running 🎃. Waiting for Ctrl-C...");
+    // Function to load and attach a kprobe
+    fn load_attach_kprobe(
+        bpf: &mut Ebpf,
+        prog_name: &str,
+        attach_name: &str,
+    ) -> Result<(), anyhow::Error> {
+        let program: &mut KProbe = bpf
+            .program_mut(prog_name)
+            .ok_or_else(|| anyhow::anyhow!("Failed to find kprobe program {}", prog_name))?
+            .try_into()?;
+        program.load()?;
+        program.attach(attach_name, 0)?;
+        info!(
+            "Loaded and attached kprobe {} -> {}",
+            prog_name, attach_name
+        );
+        Ok(())
+    }
 
-    let mut perf_array = PerfEventArray::try_from(ebpf.map_mut("EVENTS").unwrap())?;
+    // Load and attach all network probes
+    // let kprobe_mappings = [
+    //     ("net_enter_sys_connect", "__sys_connect"),
+    //     ("net_enter_sys_listen", "__sys_listen"),
+    //     ("net_enter_sys_bind", "__sys_bind"),
+    //     ("net_enter_sys_accept", "__sys_accept4"),
+    //     ("net_enter_sys_sendto", "__sys_sendto"),
+    //     ("net_enter_sys_recvfrom", "__sys_recvfrom"),
+    //     ("net_exit_sys_bind", "__sys_bind"),
+    //     ("net_exit_sys_connect", "__sys_connect"),
+    //     ("net_exit_sys_listen", "__sys_listen"),
+    // ];
+
+    // for (prog_name, attach_name) in kprobe_mappings.iter() {
+    //     if let Err(e) = load_attach_kprobe(net_bpf, prog_name, attach_name) {
+    //         warn!("Failed to load/attach kprobe {}: {}", prog_name, e);
+    //     }
+    // }
+
+    let program: &mut KProbe = file_bpf
+        .program_mut("monitor_file_open")
+        .unwrap()
+        .try_into()?;
+    program.load()?;
+    program.attach("security_file_open", 0)?;
+
+    // Open the BPF map
+    let map = file_bpf
+        .map_mut("WATCHED_INODES")
+        .ok_or_else(|| anyhow::anyhow!("Failed to find WATCHED_INODES map"))?;
+
+    let mut inode_map: HashMap<_, u64, u8> = HashMap::try_from(map)?;
+
+    // List of files to monitor
+    let files_to_monitor = vec!["/root/.ssh/authorized_keys", "/root/.bash_history"];
+
+    // Populate the inode map
+    for file_path in files_to_monitor {
+        let metadata = fs::metadata(file_path)?;
+        let inode = metadata.ino();
+        inode_map.insert(inode, 0, 0)?;
+        println!("Monitoring file: {} (inode {})", file_path, inode);
+    }
+
+    // Set up perf arrays for both process and network events
+    let mut proc_perf_array = PerfEventArray::try_from(proc_bpf.map_mut("EVENTS").unwrap())?;
+
+    let connect_program: &mut KProbe = bpf
+        .program_mut("net_enter_sys_connect")
+        .unwrap()
+        .try_into()?;
+    connect_program.load()?;
+    connect_program.attach("__sys_connect", 0)?;
+    let mut net_perf_array = match bpf.map_mut("SCARY_EVENTS") {
+        Some(map) => match PerfEventArray::try_from(map) {
+            Ok(array) => array,
+            Err(e) => {
+                error!("Failed to create network perf array: {}", e);
+                return Err(anyhow::anyhow!("Failed to create network perf array"));
+            }
+        },
+        None => {
+            error!("Failed to find SCARY_EVENTS map in main BPF program");
+            return Err(anyhow::anyhow!("Failed to find SCARY_EVENTS map"));
+        }
+    };
+    info!("🐝 Scary eBPF Monitor is running 🎃. Waiting for Ctrl-C...");
 
     for cpu_id in
         online_cpus().map_err(|e| anyhow::anyhow!("Failed to get online CPUs: {:?}", e))?
     {
-        let mut buf = perf_array.open(cpu_id, None)?;
+        let mut proc_buf = proc_perf_array.open(cpu_id, None)?;
+        let mut net_buf = net_perf_array.open(cpu_id, None)?;
         let tx = tx.clone();
         let shutdown = shutdown.clone();
 
@@ -420,40 +638,112 @@ async fn run_proc_exec(
                     break;
                 }
 
-                let events = match buf.read_events(&mut buffers) {
-                    Ok(events) => events,
-                    Err(e) => {
-                        eprintln!("Error reading exec events: {}", e);
-                        continue;
-                    }
-                };
+                // Read process events
+                // if let Ok(events) = proc_buf.read_events(&mut buffers) {
+                //     for i in 0..events.read {
+                //         let buf = &mut buffers[i];
+                //         // Read as EventData instead of Event
+                //         let ptr = buf.as_ptr() as *const EventData;
+                //         let event_data = unsafe { ptr.read_unaligned() };
 
-                for i in 0..events.read {
-                    let buf = &mut buffers[i];
-                    let ptr = buf.as_ptr() as *const EventData;
-                    let data = unsafe { ptr.read_unaligned() };
+                //         println!("Debug: Received process event");
 
-                    // Process event and create EventJson...
-                    let event_data = UserSpaceEventData(data);
-                    let event_json = event_data.to_json();
+                //         // Create UserSpaceEventData and convert to JSON
+                //         let user_space_event = UserSpaceEventData(event_data);
+                //         let event_json = EventJsonType::Process(user_space_event.to_json());
 
-                    // Serialize to pretty-printed JSON string
-                    match serde_json::to_string_pretty(&event_json) {
-                        Ok(json_str) => println!("{}", json_str),
-                        Err(e) => eprintln!("Error serializing exec event to JSON: {}", e),
-                    }
+                //         // Pretty print for debugging
+                //         if let Ok(json_str) = serde_json::to_string_pretty(&event_json) {
+                //             println!("Process Event JSON:\n{}", json_str);
+                //         }
 
-                    // Send the event to the logging task
-                    // Since we're in a blocking context, use `blocking_send`
-                    if let Err(e) = tx.blocking_send(event_json) {
-                        error!("Error sending event to logging task: {}", e);
-                    } else {
-                        debug!("Sent event to logger...");
+                //         if let Err(e) = tx.blocking_send(event_json) {
+                //             error!("Error sending process event to logging task: {}", e);
+                //         }
+                //     }
+                // }
+
+                // Read network events
+                if let Ok(events) = net_buf.read_events(&mut buffers) {
+                    for i in 0..events.read {
+                        let buf = &mut buffers[i];
+                        let ptr = buf.as_ptr() as *const ConnectEvent;
+                        let event = unsafe { ptr.read_unaligned() };
+
+                        // Safely copy packed fields to local variables
+                        let uuid_data = unsafe {
+                            [
+                                ptr::read_unaligned(&event.header.uuid.data[0]),
+                                ptr::read_unaligned(&event.header.uuid.data[1]),
+                            ]
+                        };
+
+                        let src_addr = unsafe {
+                            [
+                                ptr::read_unaligned(&event.data.src_addr.addr[0]),
+                                ptr::read_unaligned(&event.data.src_addr.addr[1]),
+                                ptr::read_unaligned(&event.data.src_addr.addr[2]),
+                                ptr::read_unaligned(&event.data.src_addr.addr[3]),
+                            ]
+                        };
+
+                        let dst_addr = unsafe {
+                            [
+                                ptr::read_unaligned(&event.data.dst_addr.addr[0]),
+                                ptr::read_unaligned(&event.data.dst_addr.addr[1]),
+                                ptr::read_unaligned(&event.data.dst_addr.addr[2]),
+                                ptr::read_unaligned(&event.data.dst_addr.addr[3]),
+                            ]
+                        };
+
+                        // Get other values
+                        let socket_fd = unsafe { ptr::read_unaligned(&event.data.sock_fd) };
+                        let proto = unsafe { ptr::read_unaligned(&event.data.proto) };
+                        let src_port = unsafe { ptr::read_unaligned(&event.data.src_port) };
+                        let dst_port = unsafe { ptr::read_unaligned(&event.data.dst_port) };
+                        let connected = unsafe { ptr::read_unaligned(&event.data.connected) };
+                        let pid = unsafe { ptr::read_unaligned(&event.header.pid) };
+                        let tid = unsafe { ptr::read_unaligned(&event.header.tid) };
+                        let timestamp = unsafe { ptr::read_unaligned(&event.header.timestamp) };
+
+                        // Convert event to JSON using local variables
+                        let json_value = json!({
+                            "event": {
+                                "uuid": format!("{:x}-{:x}", uuid_data[0], uuid_data[1]),
+                                "type": "connect",
+                                "timestamp": timestamp,
+                                "process": {
+                                    "pid": pid,
+                                    "tid": tid
+                                }
+                            },
+                            "connection": {
+                                "socket": {
+                                    "fd": socket_fd,
+                                    "protocol": proto
+                                },
+                                "source": {
+                                    "address": format!("{}.{}.{}.{}",
+                                        src_addr[0], src_addr[1], src_addr[2], src_addr[3]
+                                    ),
+                                    "port": src_port
+                                },
+                                "destination": {
+                                    "address": format!("{}.{}.{}.{}",
+                                        dst_addr[0], dst_addr[1], dst_addr[2], dst_addr[3]
+                                    ),
+                                    "port": dst_port
+                                },
+                                "state": if connected == 1 { "connected" } else { "connecting" }
+                            }
+                        });
+
+                        // Pretty print the JSON
+                        println!("{}", serde_json::to_string_pretty(&json_value).unwrap());
                     }
                 }
             }
 
-            // Drop tx to help close the channel when this task exits
             drop(tx);
         });
 
@@ -481,11 +771,33 @@ async fn run_proc_exec(
     Ok(())
 }
 
-async fn handle_logging(mut rx: mpsc::Receiver<EventJson>, logger: Arc<dyn LoggerPlugin>) {
+async fn handle_logging(mut rx: mpsc::Receiver<EventJsonType>, logger: Arc<dyn LoggerPlugin>) {
     while let Some(event_json) = rx.recv().await {
-        println!("Debug: Received event for PID: {}", event_json.pid);
-        println!("Debug: Command: {}", event_json.comm);
-        println!("Debug: Arguments: {:?}", event_json.args);
+        // Pretty print the received event
+        if let Ok(json_str) = serde_json::to_string_pretty(&event_json) {
+            println!("Logging Event:\n{}", json_str);
+        }
+        match &event_json {
+            EventJsonType::Process(process_event) => {
+                println!(
+                    "Debug: Received process event for PID: {}",
+                    process_event.pid
+                );
+            }
+            EventJsonType::Network(network_event) => {
+                println!(
+                    "Debug: Received network event for PID: {}",
+                    network_event.pid
+                );
+                println!("Debug: Command: {}", network_event.comm);
+                if let Some(addr) = &network_event.addr {
+                    println!("Debug: Address: {}", addr);
+                }
+                if let Some(port) = network_event.port {
+                    println!("Debug: Port: {}", port);
+                }
+            }
+        }
 
         let json_value: Value = match serde_json::to_value(event_json) {
             Ok(value) => value,
@@ -495,13 +807,11 @@ async fn handle_logging(mut rx: mpsc::Receiver<EventJson>, logger: Arc<dyn Logge
             }
         };
 
-        // Log event using the logger plugin
         if let Err(e) = logger.log_event(json_value).await {
             error!("Error logging event: {}", e);
         }
     }
 
-    // Ensure the remaining events are flushed when all events are received
     if let Err(e) = logger.flush().await {
         error!("Error flushing events on shutdown: {}", e);
     }

@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use aya::programs::{KProbe, TracePoint};
 use aya::Ebpf;
 use std::path::PathBuf;
 
@@ -53,20 +54,18 @@ impl ProgramBuilder {
     pub fn load(&self, ebpf: &mut Ebpf) -> Result<()> {
         match self.program_type {
             "tracepoint" => {
-                let prog = ebpf
+                let prog: &mut TracePoint = ebpf
                     .program_mut(self.function_name)
                     .ok_or_else(|| anyhow!("Failed to get program {}", self.function_name))?
                     .try_into()?;
-                let prog: &mut aya::programs::TracePoint = prog;
                 prog.load()?;
                 prog.attach(self.attach_point, self.label)?;
             }
             "kprobe" => {
-                let prog = ebpf
+                let prog: &mut KProbe = ebpf
                     .program_mut(self.function_name)
                     .ok_or_else(|| anyhow!("Failed to get program {}", self.function_name))?
                     .try_into()?;
-                let prog: &mut aya::programs::KProbe = prog;
                 prog.load()?;
                 prog.attach(self.attach_point, 0)?;
             }

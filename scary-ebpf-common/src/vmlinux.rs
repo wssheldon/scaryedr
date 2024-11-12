@@ -17468,6 +17468,13 @@ pub struct sockaddr__bindgen_ty_1__bindgen_ty_1 {
 #[derive(Debug, Copy, Clone)]
 pub struct sockaddr__bindgen_ty_1__bindgen_ty_1__bindgen_ty_1 {}
 #[repr(C)]
+pub struct sockaddr_in {
+    pub sin_family: sa_family_t,
+    pub sin_port: __be16,
+    pub sin_addr: in_addr,
+    pub sin_zero: [u8; 8],
+}
+#[repr(C)]
 #[derive(Copy, Clone)]
 pub struct msghdr {
     pub msg_name: *mut ::aya_ebpf::cty::c_void,
@@ -49304,4 +49311,3 @@ pub struct uevent_sock {
     pub list: list_head,
     pub sk: *mut sock,
 }
-

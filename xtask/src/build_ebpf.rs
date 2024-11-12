@@ -74,9 +74,10 @@ pub fn build_ebpf(opts: Options) -> Result<(), anyhow::Error> {
         Ok(())
     };
 
+    build_ebpf("ebpf")?;
     build_ebpf("scary-ebpf-process")?;
     build_ebpf("scary-ebpf-net")?;
-    build_ebpf("scary-ebpf-file-lsm")?;
+    build_ebpf("scary-ebpf-file")?;
 
     Ok(())
 }

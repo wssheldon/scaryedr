@@ -3,12 +3,15 @@ name = "scary-ebpf-net"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.bpf]
+name = "scary-ebpf-net"
+
 [dependencies]
 aya-ebpf = { git = "https://github.com/aya-rs/aya" }
 aya-log-ebpf = { git = "https://github.com/aya-rs/aya" }
-scary-common = { path = "../scary-common" }
+scary-ebpf-common = { path = "../scary-ebpf-common" }
 network-types = "0.0.7"
 
 [[bin]]
-name = "scary-ebpf"
+name = "scary-ebpf-net"
 path = "src/main.rs"

@@ -1,16 +1,22 @@
 [package]
-name = "scary-ebpf-file-lsm"
+name = "ebpf"
 version = "0.1.0"
 edition = "2021"
 
 [package.metadata.bpf]
-name = "scary-ebpf-file-lsm"
+name = "ebpf"
 
 [dependencies]
 aya-ebpf = { git = "https://github.com/aya-rs/aya" }
 aya-log-ebpf = { git = "https://github.com/aya-rs/aya" }
-scary-common = { path = "../scary-common" }
+scary-ebpf-common = { path = "../scary-ebpf-common" }
+zerocopy = "0.8.9"
+zerocopy-derive = "0.8.9"
 
 [[bin]]
-name = "scary-ebpf-file-lsm"
+name = "ebpf"
 path = "src/main.rs"
+
+[lib]
+name = "ebpf"
+path = "src/lib.rs"

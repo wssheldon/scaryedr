@@ -9,6 +9,7 @@ name = "scary-ebpf-common"
 [dependencies]
 aya-ebpf = { git = "https://github.com/aya-rs/aya" }
 aya-log-ebpf = { git = "https://github.com/aya-rs/aya" }
+zerocopy = { version = "0.8.9", features = ["derive"] }
 
 [lib]
 crate-type = ["rlib"]

@@ -9,7 +9,6 @@ name = "scary-ebpf-process"
 [dependencies]
 aya-ebpf = { git = "https://github.com/aya-rs/aya" }
 aya-log-ebpf = { git = "https://github.com/aya-rs/aya" }
-scary-common = { path = "../scary-common" }
 scary-ebpf-common = { path = "../scary-ebpf-common" }
 
 [[bin]]

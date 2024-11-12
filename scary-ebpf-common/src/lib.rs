@@ -1,4 +1,8 @@
 #![no_std]
+pub mod bpf;
+pub mod error;
+pub mod event;
+pub mod task;
 #[allow(non_upper_case_globals)]
 #[allow(non_snake_case)]
 #[allow(non_camel_case_types)]
@@ -7,8 +11,6 @@ pub mod vmlinux;
 pub mod bindings {
     pub use super::vmlinux::*;
 }
-
-use core::str;
 
 pub const COMM_SIZE: usize = 16;
 pub const FILENAME_SIZE: usize = 256;

@@ -2,18 +2,17 @@
 resolver = "2"
 members = [
     "xtask",
+    "ebpf",
     "scary",
-    "scary-common",
     "scary-userspace-common",
     "scary-ebpf-common",
     "scary-ebpf-net",
     "scary-ebpf-process",
-    "scary-ebpf-file-lsm",
     "scary-ebpf-file",
     "scary-ebpf-common",
     "scary-logger-plugins",
 ]
-default-members = ["xtask", "scary", "scary-common"]
+default-members = ["xtask", "scary"]
 
 [workspace.dependencies]
 aya = { version = "0.13.0", default-features = false }
