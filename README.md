@@ -1,5 +1,7 @@
 # scary
 
+![eBPF](docs/assets/ebpf.png)
+
 ```bash
 🐝 Starting the process execution monitor... 🐝
 
