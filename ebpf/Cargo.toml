@@ -6,6 +6,9 @@ edition = "2021"
 [package.metadata.bpf]
 name = "ebpf"
 
+[features]
+default = []
+
 [dependencies]
 aya-ebpf = { git = "https://github.com/aya-rs/aya" }
 aya-log-ebpf = { git = "https://github.com/aya-rs/aya" }

@@ -1,6 +1,10 @@
+pub mod bind;
 pub mod connect;
+pub mod dns;
 pub mod execve;
+pub mod file;
 pub mod listen;
+pub mod path;
 pub mod socket;
 
 use aya_ebpf::helpers::{

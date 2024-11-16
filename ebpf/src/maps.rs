@@ -21,7 +21,6 @@
 
 use super::events::Event;
 use aya_ebpf::{macros::map, maps::PerfEventByteArray, EbpfContext};
-use zerocopy::{FromBytes, IntoBytes};
 
 #[map(name = "SCARY_EVENTS")]
 pub static mut EVENTS: PerfEventByteArray = PerfEventByteArray::new(0);

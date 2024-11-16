@@ -4,6 +4,9 @@
   <img src="docs/assets/ebpf.png" width="20%" />
 </p>
 
+> [!WARNING]
+> This project is actively in development and should not be used in any production capacity.
+
 ```bash
 🐝 Starting the process execution monitor... 🐝
 

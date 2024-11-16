@@ -16,8 +16,9 @@ use clap::Parser;
 use config::{Config, File};
 use ebpf::events::{
     connect::{ConnectData, ConnectEvent},
+    file::{FileEvent, FileFlags, FileKey},
     socket::IpAddr,
-    Event, Type as EventType,
+    Event, Header, Type as EventType,
 };
 use log::{debug, error, info, warn};
 use nix::sys::utsname::uname;
@@ -443,38 +444,11 @@ async fn main() -> Result<(), anyhow::Error> {
     agent_config.ip_blocking = config.get_bool("agent.ip_blocking")?;
     agent_config.logging = config.get_bool("agent.logging")?;
 
-    println!("🐝 Welcome to the Scary eBPF! 🎃");
+    println!("🍯 Initialized");
 
     loop {
-        println!("\nPlease select an option:");
-        println!("1. 🛡️ IP blocking");
-        println!("2. 📊 Run the file integrity monitor");
-        println!("3. 🚀 Run the process execution monitor");
-        println!("4. 🚪 Exit");
-
-        print!("Enter your choice: ");
-        io::stdout().flush().unwrap();
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
-
-        match input.trim() {
-            "1" => {
-                println!("IP blocking is now enabled",);
-            }
-            "2" => {
-                todo!();
-            }
-            "3" => {
-                println!("🐝 Starting the process execution monitor... 🐝");
-                run_proc_exec(&agent_config, &logger_config).await?;
-            }
-            "4" => {
-                println!("🐝 Thanks for using Scary eBPF! Goodbye! 🐝");
-                return Ok(());
-            }
-            _ => println!("Invalid option, please try again."),
-        }
+        println!("🐝 Swarming...");
+        run_proc_exec(&agent_config, &logger_config).await?;
     }
 }
 
@@ -511,13 +485,9 @@ async fn run_proc_exec(
     // Load both process and network monitoring programs
     let ebpf_path = get_ebpf_path("ebpf");
     let proc_ebpf_path = get_ebpf_path("scary-ebpf-process");
-    // let net_ebpf_path = get_ebpf_path("scary-ebpf-net");
-    let file_ebpf_path = get_ebpf_path("scary-ebpf-file");
 
     let bpf = Box::leak(Box::new(Ebpf::load_file(ebpf_path)?));
     let proc_bpf = Box::leak(Box::new(Ebpf::load_file(proc_ebpf_path)?));
-    // let net_bpf = Box::leak(Box::new(Ebpf::load_file(net_ebpf_path)?));
-    let file_bpf = Box::leak(Box::new(Ebpf::load_file(file_ebpf_path)?));
 
     // Initialize eBPF loggers
     if config.logging {
@@ -527,76 +497,22 @@ async fn run_proc_exec(
         if let Err(e) = EbpfLogger::init(proc_bpf) {
             warn!("failed to initialize eBPF logger for exec tracer: {}", e);
         }
-        // if let Err(e) = EbpfLogger::init(net_bpf) {
-        //     warn!(
-        //         "failed to initialize eBPF logger for network monitor: {}",
-        //         e
-        //     );
-        // }
-        if let Err(e) = EbpfLogger::init(file_bpf) {
-            warn!("failed to initialize eBPF logger for file monitor: {}", e);
-        }
     }
 
     // Load and attach process monitoring programs
     EXEC_ENTER.load(proc_bpf)?;
     EXEC_EXIT.load(proc_bpf)?;
 
-    // Load and attach network monitoring programs
-    // CONNECT_PROBE.load(bpf)?;
-    // CONNECT_RETPROBE.load(bpf)?;
-
-    // Function to load and attach a kprobe
-    fn load_attach_kprobe(
-        bpf: &mut Ebpf,
-        prog_name: &str,
-        attach_name: &str,
-    ) -> Result<(), anyhow::Error> {
-        let program: &mut KProbe = bpf
-            .program_mut(prog_name)
-            .ok_or_else(|| anyhow::anyhow!("Failed to find kprobe program {}", prog_name))?
-            .try_into()?;
-        program.load()?;
-        program.attach(attach_name, 0)?;
-        info!(
-            "Loaded and attached kprobe {} -> {}",
-            prog_name, attach_name
-        );
-        Ok(())
-    }
-
-    // Load and attach all network probes
-    // let kprobe_mappings = [
-    //     ("net_enter_sys_connect", "__sys_connect"),
-    //     ("net_enter_sys_listen", "__sys_listen"),
-    //     ("net_enter_sys_bind", "__sys_bind"),
-    //     ("net_enter_sys_accept", "__sys_accept4"),
-    //     ("net_enter_sys_sendto", "__sys_sendto"),
-    //     ("net_enter_sys_recvfrom", "__sys_recvfrom"),
-    //     ("net_exit_sys_bind", "__sys_bind"),
-    //     ("net_exit_sys_connect", "__sys_connect"),
-    //     ("net_exit_sys_listen", "__sys_listen"),
-    // ];
-
-    // for (prog_name, attach_name) in kprobe_mappings.iter() {
-    //     if let Err(e) = load_attach_kprobe(net_bpf, prog_name, attach_name) {
-    //         warn!("Failed to load/attach kprobe {}: {}", prog_name, e);
-    //     }
-    // }
-
-    let program: &mut KProbe = file_bpf
-        .program_mut("monitor_file_open")
-        .unwrap()
-        .try_into()?;
+    let program: &mut KProbe = bpf.program_mut("monitor_file_open").unwrap().try_into()?;
     program.load()?;
     program.attach("security_file_open", 0)?;
 
     // Open the BPF map
-    let map = file_bpf
-        .map_mut("WATCHED_INODES")
-        .ok_or_else(|| anyhow::anyhow!("Failed to find WATCHED_INODES map"))?;
+    let map = bpf
+        .map_mut("INODE_TRACKING")
+        .ok_or_else(|| anyhow::anyhow!("Failed to find INODE_TRACKING map"))?;
 
-    let mut inode_map: HashMap<_, u64, u8> = HashMap::try_from(map)?;
+    let mut inode_map: HashMap<&mut MapData, u64, u32> = HashMap::try_from(map)?;
 
     // List of files to monitor
     let files_to_monitor = vec!["/root/.ssh/authorized_keys", "/root/.bash_history"];
@@ -605,7 +521,7 @@ async fn run_proc_exec(
     for file_path in files_to_monitor {
         let metadata = fs::metadata(file_path)?;
         let inode = metadata.ino();
-        inode_map.insert(inode, 0, 0)?;
+        inode_map.insert(&inode, &1, 0)?; // Use 1 as a simple flag
         println!("Monitoring file: {} (inode {})", file_path, inode);
     }
 
@@ -618,7 +534,8 @@ async fn run_proc_exec(
         .try_into()?;
     connect_program.load()?;
     connect_program.attach("__sys_connect", 0)?;
-    let mut net_perf_array = match bpf.map_mut("SCARY_EVENTS") {
+
+    let mut perf_array = match bpf.map_mut("SCARY_EVENTS") {
         Some(map) => match PerfEventArray::try_from(map) {
             Ok(array) => array,
             Err(e) => {
@@ -636,8 +553,7 @@ async fn run_proc_exec(
     for cpu_id in
         online_cpus().map_err(|e| anyhow::anyhow!("Failed to get online CPUs: {:?}", e))?
     {
-        let mut proc_buf = proc_perf_array.open(cpu_id, None)?;
-        let mut net_buf = net_perf_array.open(cpu_id, None)?;
+        let mut buf = perf_array.open(cpu_id, None)?;
         let tx = tx.clone();
         let shutdown = shutdown.clone();
 
@@ -650,133 +566,30 @@ async fn run_proc_exec(
                     break;
                 }
 
-                // Read process events
-                // if let Ok(events) = proc_buf.read_events(&mut buffers) {
-                //     for i in 0..events.read {
-                //         let buf = &mut buffers[i];
-                //         // Read as EventData instead of Event
-                //         let ptr = buf.as_ptr() as *const EventData;
-                //         let event_data = unsafe { ptr.read_unaligned() };
-
-                //         println!("Debug: Received process event");
-
-                //         // Create UserSpaceEventData and convert to JSON
-                //         let user_space_event = UserSpaceEventData(event_data);
-                //         let event_json = EventJsonType::Process(user_space_event.to_json());
-
-                //         // Pretty print for debugging
-                //         if let Ok(json_str) = serde_json::to_string_pretty(&event_json) {
-                //             println!("Process Event JSON:\n{}", json_str);
-                //         }
-
-                //         if let Err(e) = tx.blocking_send(event_json) {
-                //             error!("Error sending process event to logging task: {}", e);
-                //         }
-                //     }
-                // }
-
-                // Read network events
-                if let Ok(events) = net_buf.read_events(&mut buffers) {
+                if let Ok(events) = buf.read_events(&mut buffers) {
                     for i in 0..events.read {
                         let buf = &mut buffers[i];
-                        let ptr = buf.as_ptr() as *const ConnectEvent;
-                        let event = unsafe { ptr.read_unaligned() };
 
-                        // Safely copy packed fields to local variables
-                        let uuid_data = unsafe {
-                            [
-                                ptr::read_unaligned(&event.header.uuid.data[0]),
-                                ptr::read_unaligned(&event.header.uuid.data[1]),
-                            ]
+                        // Read the entire event header first
+                        let header = unsafe {
+                            let ptr = buf.as_ptr() as *const Header;
+                            ptr::read_unaligned(ptr)
                         };
 
-                        let src_addr = unsafe {
-                            [
-                                ptr::read_unaligned(&event.data.socket.src_addr.addr[0]),
-                                ptr::read_unaligned(&event.data.socket.src_addr.addr[1]),
-                                ptr::read_unaligned(&event.data.socket.src_addr.addr[2]),
-                                ptr::read_unaligned(&event.data.socket.src_addr.addr[3]),
-                            ]
-                        };
+                        println!("Debug: Received event with type: {}", header.event_type);
 
-                        let dst_addr = unsafe {
-                            [
-                                ptr::read_unaligned(&event.data.socket.dst_addr.addr[0]),
-                                ptr::read_unaligned(&event.data.socket.dst_addr.addr[1]),
-                                ptr::read_unaligned(&event.data.socket.dst_addr.addr[2]),
-                                ptr::read_unaligned(&event.data.socket.dst_addr.addr[3]),
-                            ]
-                        };
-
-                        // Get task info
-                        let task_info = unsafe {
-                            let task_info = &event.header.task_info;
-                            TaskInfoValues {
-                                pid: ptr::read_unaligned(&task_info.pid),
-                                tid: ptr::read_unaligned(&task_info.tid),
-                                ppid: ptr::read_unaligned(&task_info.ppid),
-                                uid: ptr::read_unaligned(&task_info.uid),
-                                gid: ptr::read_unaligned(&task_info.gid),
-                                start_time: ptr::read_unaligned(&task_info.start_time),
-                                comm: {
-                                    let mut comm = [0u8; 16];
-                                    for (i, byte) in comm.iter_mut().enumerate() {
-                                        *byte = ptr::read_unaligned(&task_info.comm[i]);
-                                    }
-                                    String::from_utf8_lossy(&comm)
-                                        .trim_matches('\0')
-                                        .to_string()
-                                },
+                        match header.event_type {
+                            0 => println!("Process event"),
+                            1 => {
+                                println!("Debug: Handling network event");
+                                handle_network_event(buf);
                             }
-                        };
-
-                        // Get other values
-                        let socket_fd = unsafe { ptr::read_unaligned(&event.data.socket.sock_fd) };
-                        let proto = unsafe { ptr::read_unaligned(&event.data.socket.proto) };
-                        let src_port = unsafe { ptr::read_unaligned(&event.data.socket.src_port) };
-                        let dst_port = unsafe { ptr::read_unaligned(&event.data.socket.dst_port) };
-                        let connected = unsafe { ptr::read_unaligned(&event.data.connected) };
-                        let timestamp = unsafe { ptr::read_unaligned(&event.header.timestamp) };
-
-                        // Convert event to JSON using local variables
-                        let json_value = json!({
-                            "event": {
-                                "uuid": format!("{:x}-{:x}", uuid_data[0], uuid_data[1]),
-                                "type": "connect",
-                                "timestamp": timestamp,
-                                "process": {
-                                    "pid": task_info.pid,
-                                    "tid": task_info.tid,
-                                    "ppid": task_info.ppid,
-                                    "uid": task_info.uid,
-                                    "gid": task_info.gid,
-                                    "start_time": task_info.start_time,
-                                    "comm": task_info.comm,
-                                }
-                            },
-                            "connection": {
-                                "socket": {
-                                    "fd": socket_fd,
-                                    "protocol": proto
-                                },
-                                "source": {
-                                    "address": format!("{}.{}.{}.{}",
-                                        src_addr[0], src_addr[1], src_addr[2], src_addr[3]
-                                    ),
-                                    "port": src_port
-                                },
-                                "destination": {
-                                    "address": format!("{}.{}.{}.{}",
-                                        dst_addr[0], dst_addr[1], dst_addr[2], dst_addr[3]
-                                    ),
-                                    "port": dst_port
-                                },
-                                "state": if connected == 1 { "connected" } else { "connecting" }
+                            2 => {
+                                println!("Debug: Handling file event");
+                                handle_file_event(buf);
                             }
-                        });
-
-                        // Pretty print the JSON
-                        println!("{}", serde_json::to_string_pretty(&json_value).unwrap());
+                            _ => println!("Unknown event type: {}", header.event_type),
+                        }
                     }
                 }
             }
@@ -806,6 +619,181 @@ async fn run_proc_exec(
     logging_handle.await?;
 
     Ok(())
+}
+
+fn handle_file_event(buf: &mut BytesMut) {
+    println!("Debug: Handling file event");
+
+    let ptr = buf.as_ptr() as *const FileEvent;
+    let event = unsafe { ptr.read_unaligned() };
+
+    // Get task info and other fields safely
+    let task_info = unsafe {
+        let task_info = &event.header.task_info;
+        TaskInfoValues {
+            pid: ptr::read_unaligned(&task_info.pid),
+            tid: ptr::read_unaligned(&task_info.tid),
+            ppid: ptr::read_unaligned(&task_info.ppid),
+            uid: ptr::read_unaligned(&task_info.uid),
+            gid: ptr::read_unaligned(&task_info.gid),
+            start_time: ptr::read_unaligned(&task_info.start_time),
+            comm: {
+                let mut comm = [0u8; 16];
+                for (i, byte) in comm.iter_mut().enumerate() {
+                    *byte = ptr::read_unaligned(&task_info.comm[i]);
+                }
+                String::from_utf8_lossy(&comm)
+                    .trim_matches('\0')
+                    .to_string()
+            },
+        }
+    };
+
+    let uuid_data = unsafe {
+        [
+            ptr::read_unaligned(&event.header.uuid.data[0]),
+            ptr::read_unaligned(&event.header.uuid.data[1]),
+        ]
+    };
+
+    let inode = unsafe { ptr::read_unaligned(&event.data.inode) };
+    let operation = unsafe { ptr::read_unaligned(&event.data.operation) };
+    let timestamp = unsafe { ptr::read_unaligned(&event.header.timestamp) };
+
+    let path = unsafe {
+        let path_bytes = &event.data.path[..event.data.path_len as usize];
+        String::from_utf8_lossy(path_bytes).into_owned()
+    };
+
+    let json_value = json!({
+        "event": {
+            "uuid": format!("{:x}-{:x}", uuid_data[0], uuid_data[1]),
+            "type": "file_access",
+            "timestamp": timestamp,
+            "process": {
+                "pid": task_info.pid,
+                "tid": task_info.tid,
+                "ppid": task_info.ppid,
+                "uid": task_info.uid,
+                "gid": task_info.gid,
+                "start_time": task_info.start_time,
+                "comm": task_info.comm,
+            }
+        },
+        "file": {
+            "inode": inode,
+            "path": path,
+            "operation": match operation {
+                3 => "open",
+                _ => "unknown"
+            },
+        }
+    });
+
+    // Pretty print the JSON
+    println!("{}", serde_json::to_string_pretty(&json_value).unwrap());
+}
+
+fn handle_network_event(buf: &mut BytesMut) {
+    println!("Debug: Handling network event");
+
+    let ptr = buf.as_ptr() as *const ConnectEvent;
+    let event = unsafe { ptr.read_unaligned() };
+
+    let uuid_data = unsafe {
+        [
+            ptr::read_unaligned(&event.header.uuid.data[0]),
+            ptr::read_unaligned(&event.header.uuid.data[1]),
+        ]
+    };
+
+    let src_addr = unsafe {
+        [
+            ptr::read_unaligned(&event.data.socket.src_addr.addr[0]),
+            ptr::read_unaligned(&event.data.socket.src_addr.addr[1]),
+            ptr::read_unaligned(&event.data.socket.src_addr.addr[2]),
+            ptr::read_unaligned(&event.data.socket.src_addr.addr[3]),
+        ]
+    };
+
+    let dst_addr = unsafe {
+        [
+            ptr::read_unaligned(&event.data.socket.dst_addr.addr[0]),
+            ptr::read_unaligned(&event.data.socket.dst_addr.addr[1]),
+            ptr::read_unaligned(&event.data.socket.dst_addr.addr[2]),
+            ptr::read_unaligned(&event.data.socket.dst_addr.addr[3]),
+        ]
+    };
+
+    // Get task info
+    let task_info = unsafe {
+        let task_info = &event.header.task_info;
+        TaskInfoValues {
+            pid: ptr::read_unaligned(&task_info.pid),
+            tid: ptr::read_unaligned(&task_info.tid),
+            ppid: ptr::read_unaligned(&task_info.ppid),
+            uid: ptr::read_unaligned(&task_info.uid),
+            gid: ptr::read_unaligned(&task_info.gid),
+            start_time: ptr::read_unaligned(&task_info.start_time),
+            comm: {
+                let mut comm = [0u8; 16];
+                for (i, byte) in comm.iter_mut().enumerate() {
+                    *byte = ptr::read_unaligned(&task_info.comm[i]);
+                }
+                String::from_utf8_lossy(&comm)
+                    .trim_matches('\0')
+                    .to_string()
+            },
+        }
+    };
+
+    // Get other values
+    let socket_fd = unsafe { ptr::read_unaligned(&event.data.socket.sock_fd) };
+    let proto = unsafe { ptr::read_unaligned(&event.data.socket.proto) };
+    let src_port = unsafe { ptr::read_unaligned(&event.data.socket.src_port) };
+    let dst_port = unsafe { ptr::read_unaligned(&event.data.socket.dst_port) };
+    let connected = unsafe { ptr::read_unaligned(&event.data.connected) };
+    let timestamp = unsafe { ptr::read_unaligned(&event.header.timestamp) };
+
+    // Convert event to JSON using local variables
+    let json_value = json!({
+        "event": {
+            "uuid": format!("{:x}-{:x}", uuid_data[0], uuid_data[1]),
+            "type": "connect",
+            "timestamp": timestamp,
+            "process": {
+                "pid": task_info.pid,
+                "tid": task_info.tid,
+                "ppid": task_info.ppid,
+                "uid": task_info.uid,
+                "gid": task_info.gid,
+                "start_time": task_info.start_time,
+                "comm": task_info.comm,
+            }
+        },
+        "connection": {
+            "socket": {
+                "fd": socket_fd,
+                "protocol": proto
+            },
+            "source": {
+                "address": format!("{}.{}.{}.{}",
+                    src_addr[0], src_addr[1], src_addr[2], src_addr[3]
+                ),
+                "port": src_port
+            },
+            "destination": {
+                "address": format!("{}.{}.{}.{}",
+                    dst_addr[0], dst_addr[1], dst_addr[2], dst_addr[3]
+                ),
+                "port": dst_port
+            },
+            "state": if connected == 1 { "connected" } else { "connecting" }
+        }
+    });
+
+    // Pretty print the JSON
+    println!("{}", serde_json::to_string_pretty(&json_value).unwrap());
 }
 
 async fn handle_logging(mut rx: mpsc::Receiver<EventJsonType>, logger: Arc<dyn LoggerPlugin>) {

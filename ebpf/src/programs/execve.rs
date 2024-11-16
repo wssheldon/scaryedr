@@ -131,9 +131,9 @@ struct PathData {
     max_len: usize,
 }
 
-#[no_mangle]
-#[link_section = "classifier"]
-static PROCESS_DENTRY: unsafe extern "C" fn(u32, *mut c_void) -> i32 = _process_dentry;
+// #[no_mangle]
+// #[link_section = "classifier"]
+// static PROCESS_DENTRY: unsafe extern "C" fn(u32, *mut c_void) -> i32 = _process_dentry;
 
 const MAX_NAME_LEN: usize = 32;
 
