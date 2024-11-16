@@ -6,7 +6,11 @@ use aya_ebpf::{
 };
 
 use crate::{
-    events::{file::FileData, path::PathBuilder, Event, Type},
+    events::{
+        file::FileData,
+        path::{PathBuilder, PathInfo},
+        Event, Type,
+    },
     maps::send,
 };
 
@@ -73,13 +77,13 @@ impl FileRef {
     }
 
     #[inline(always)]
-    fn get_path(&self, buffer: &mut [u8]) -> Result<usize, i64> {
+    fn get_path(&self) -> Result<PathInfo, i64> {
         unsafe {
             let dentry = bpf_probe_read_kernel(&(*self.0).f_path.dentry)?;
             if dentry.is_null() {
-                return Ok(0);
+                return Ok(PathInfo::empty());
             }
-            PathBuilder::build_path(dentry, buffer)
+            PathBuilder::build_path(dentry)
         }
     }
 }
@@ -95,15 +99,19 @@ impl InodeRef {
 }
 
 #[inline(always)]
-fn create_file_event(ctx: &ProbeContext, file: &FileRef, inode: u64) -> Result<(), i64> {
+fn create_file_event(
+    ctx: &ProbeContext,
+    file: &FileRef,
+    inode: u64,
+    path_info: PathInfo,
+) -> Result<(), i64> {
     let event_buf = unsafe { FILE_EVENT_BUFFER.get_ptr_mut(0) }.ok_or(-1)?;
 
     unsafe {
         (*event_buf) = Event::new(Type::File, FileData::new(inode));
 
-        if let Ok(len) = file.get_path(&mut (*event_buf).data.path) {
-            (*event_buf).data.path_len = (len as u16).min(255);
-        }
+        // Copy path using the PathInfo method
+        (*event_buf).data.path_len = path_info.copy_to_slice(&mut (*event_buf).data.path);
 
         send(ctx, &*event_buf);
     }
@@ -130,7 +138,8 @@ fn try_monitor_file_open(ctx: &ProbeContext) -> Result<(), i64> {
     if let Some(inode_ref) = file.get_inode()? {
         let inode_number = inode_ref.get_number()?;
         if file.track_inode(inode_number)? {
-            return create_file_event(ctx, &file, inode_number);
+            let path_info = file.get_path()?;
+            return create_file_event(ctx, &file, inode_number, path_info);
         }
     }
 
@@ -138,7 +147,8 @@ fn try_monitor_file_open(ctx: &ProbeContext) -> Result<(), i64> {
     if let Some(inode_ref) = file.get_dentry_inode()? {
         let inode_number = inode_ref.get_number()?;
         if file.track_inode(inode_number)? {
-            return create_file_event(ctx, &file, inode_number);
+            let path_info = file.get_path()?;
+            return create_file_event(ctx, &file, inode_number, path_info);
         }
     }
 

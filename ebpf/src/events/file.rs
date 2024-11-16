@@ -44,10 +44,10 @@ impl FileFlags {
 pub struct FileData {
     pub inode: u64,
     pub pid: u32,
-    pub operation: u8, // READ = 1, WRITE = 2, OPEN = 3, etc.
+    pub operation: u8,
     pub _pad: [u8; 3],
     pub comm: [u8; 16],
-    pub path: [u8; 128],
+    pub path: [u8; 64], // Reduced from 128 to help verifier
     pub path_len: u16,
 }
 
@@ -59,7 +59,7 @@ impl FileData {
             operation: 0,
             _pad: [0; 3],
             comm: [0; 16],
-            path: [0; 128],
+            path: [0; 64],
             path_len: 0,
         }
     }
@@ -67,15 +67,12 @@ impl FileData {
     #[inline(always)]
     pub fn set_comm(&mut self, comm: &[u8]) {
         let len = comm.len().min(15);
-        self.comm[..len].copy_from_slice(&comm[..len]);
+        // Copy in small chunks
+        for i in 0..(len / 4) {
+            let start = i * 4;
+            let chunk = &comm[start..start + 4.min(len - start)];
+            self.comm[start..start + chunk.len()].copy_from_slice(chunk);
+        }
         self.comm[len] = 0;
-    }
-
-    #[inline(always)]
-    pub fn set_path(&mut self, path: &[u8]) {
-        let len = path.len().min(127);
-        self.path[..len].copy_from_slice(&path[..len]);
-        self.path[len] = 0;
-        self.path_len = len as u16;
     }
 }
