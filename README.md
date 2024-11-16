@@ -8,24 +8,29 @@
 > This project is actively in development and should not be used in any production capacity.
 
 ```bash
-🐝 Starting the process execution monitor... 🐝
+🍯 Initialized
+🐝 Swarming...
 
 {
-  "exec_id": "d8nPtgBlxzQhnjFFLh4/hs8MU8lcyaQ7hP5ePGNg7BcqHUjOk7s7o8ppksP0VrkajvcOyTAxbWnOe8ZEYO5xJQ==",
-  "pid": 493853,
-  "ppid": 493844,
-  "tid": 493853,
-  "uid": 0,
-  "gid": 0,
-  "comm": "cat",
-  "cwd": "/root/Projects/scary",
-  "binary": "/usr/bin/cat",
-  "args": [
-    "/root/.ssh/authorized_keys"
-  ],
-  "username": "root",
-  "hostname": "ubuntu-32gb-hil-1",
-  "timestamp": "2024-10-30T02:04:36.080166068+00:00"
+  "event": {
+    "process": {
+      "comm": "cat",
+      "gid": 493844,
+      "pid": 493853,
+      "ppid": 0,
+      "start_time": 2821292941523322,
+      "tid": 1028762,
+      "uid": 0
+    },
+    "timestamp": 2821292941523091,
+    "type": "file_access",
+    "uuid": "7e34ec43df562e78-8c79be94651456f5"
+  },
+  "file": {
+    "inode": 217558,
+    "operation": "read",
+    "path": "/root/.ssh/authorized_keys"
+  }
 }
 
 2024-10-16T00:58:32.823465Z  INFO scary_logger_plugins::s3: Flushing 1 events to S3
