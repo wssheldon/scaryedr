@@ -4,7 +4,7 @@ use crate::programs::{get_ebpf_path, MapBuilder, ProgramBuilder};
 use aya::{
     include_bytes_aligned,
     maps::{HashMap, MapData, PerfEventArray},
-    programs::{KProbe, SocketFilter, TracePoint, Xdp, XdpFlags},
+    programs::{KProbe, Program, TracePoint, UProbe, Xdp, XdpFlags},
     util::online_cpus,
     Ebpf,
 };
@@ -18,6 +18,7 @@ use ebpf::events::{
     connect::{ConnectData, ConnectEvent},
     file::{FileEvent, FileFlags, FileKey},
     socket::IpAddr,
+    ssl::SslEvent,
     Event, Header, Type as EventType,
 };
 use log::{debug, error, info, warn};
@@ -535,6 +536,33 @@ async fn run_proc_exec(
     connect_program.load()?;
     connect_program.attach("__sys_connect", 0)?;
 
+    // Path to the SSL library
+    let ssl_lib = "libssl.so.3"; // or "libssl.so.1.1" depending on your system
+
+    // Load and attach SSL read uprobe
+    let program: &mut Program = bpf.program_mut("ssl_read").unwrap();
+    let ssl_read_uprobe: &mut UProbe = program.try_into()?;
+    ssl_read_uprobe.load()?;
+    ssl_read_uprobe.attach(Some("SSL_read"), 0, ssl_lib, None)?;
+
+    // Load and attach SSL write uprobe
+    let program: &mut Program = bpf.program_mut("ssl_write").unwrap();
+    let ssl_write_uprobe: &mut UProbe = program.try_into()?;
+    ssl_write_uprobe.load()?;
+    ssl_write_uprobe.attach(Some("SSL_write"), 0, ssl_lib, None)?;
+
+    // Load and attach SSL read return probe
+    let program: &mut Program = bpf.program_mut("ssl_read_ret").unwrap();
+    let ssl_read_ret: &mut UProbe = program.try_into()?;
+    ssl_read_ret.load()?;
+    ssl_read_ret.attach(Some("SSL_read"), 0, ssl_lib, None)?;
+
+    // Load and attach SSL write return probe
+    let program: &mut Program = bpf.program_mut("ssl_write_ret").unwrap();
+    let ssl_write_ret: &mut UProbe = program.try_into()?;
+    ssl_write_ret.load()?;
+    ssl_write_ret.attach(Some("SSL_write"), 0, ssl_lib, None)?;
+
     let mut perf_array = match bpf.map_mut("SCARY_EVENTS") {
         Some(map) => match PerfEventArray::try_from(map) {
             Ok(array) => array,
@@ -587,6 +615,11 @@ async fn run_proc_exec(
                             2 => {
                                 println!("Debug: Handling file event");
                                 handle_file_event(buf);
+                            }
+                            3 => {
+                                // Add this case for SSL events
+                                println!("Debug: Handling SSL event");
+                                handle_ssl_event(buf);
                             }
                             _ => println!("Unknown event type: {}", header.event_type),
                         }
@@ -660,9 +693,20 @@ fn handle_file_event(buf: &mut BytesMut) {
     let operation = unsafe { ptr::read_unaligned(&event.data.operation) };
     let timestamp = unsafe { ptr::read_unaligned(&event.header.timestamp) };
 
+    // Get path and reverse it
     let path = unsafe {
-        let path_bytes = &event.data.path[..event.data.path_len as usize];
-        String::from_utf8_lossy(path_bytes).into_owned()
+        let path_len = event.data.path_len as usize;
+        let path_bytes = &event.data.path[..path_len];
+        let actual_len = path_bytes.iter().position(|&x| x == 0).unwrap_or(path_len);
+
+        let mut path = String::from_utf8_lossy(&path_bytes[..actual_len]).into_owned();
+
+        // Ensure the path starts with a forward slash
+        if !path.starts_with('/') {
+            path = format!("/{}", path);
+        }
+
+        path
     };
 
     let json_value = json!({
@@ -796,6 +840,74 @@ fn handle_network_event(buf: &mut BytesMut) {
     println!("{}", serde_json::to_string_pretty(&json_value).unwrap());
 }
 
+fn handle_ssl_event(buf: &mut BytesMut) {
+    println!("Debug: Handling SSL event");
+
+    let ptr = buf.as_ptr() as *const SslEvent;
+    let event = unsafe { ptr.read_unaligned() };
+
+    // Get task info and other fields safely
+    let task_info = unsafe {
+        let task_info = &event.header.task_info;
+        TaskInfoValues {
+            pid: ptr::read_unaligned(&task_info.pid),
+            tid: ptr::read_unaligned(&task_info.tid),
+            ppid: ptr::read_unaligned(&task_info.ppid),
+            uid: ptr::read_unaligned(&task_info.uid),
+            gid: ptr::read_unaligned(&task_info.gid),
+            start_time: ptr::read_unaligned(&task_info.start_time),
+            comm: {
+                let mut comm = [0u8; 16];
+                for (i, byte) in comm.iter_mut().enumerate() {
+                    *byte = ptr::read_unaligned(&task_info.comm[i]);
+                }
+                String::from_utf8_lossy(&comm)
+                    .trim_matches('\0')
+                    .to_string()
+            },
+        }
+    };
+
+    let uuid_data = unsafe {
+        [
+            ptr::read_unaligned(&event.header.uuid.data[0]),
+            ptr::read_unaligned(&event.header.uuid.data[1]),
+        ]
+    };
+
+    // Get SSL-specific data
+    let kind = unsafe { ptr::read_unaligned(&event.data.kind) };
+    let len = unsafe { ptr::read_unaligned(&event.data.len) };
+    let timestamp = unsafe { ptr::read_unaligned(&event.header.timestamp) };
+
+    let json_value = json!({
+        "event": {
+            "uuid": format!("{:x}-{:x}", uuid_data[0], uuid_data[1]),
+            "type": "ssl",
+            "timestamp": timestamp,
+            "process": {
+                "pid": task_info.pid,
+                "tid": task_info.tid,
+                "ppid": task_info.ppid,
+                "uid": task_info.uid,
+                "gid": task_info.gid,
+                "start_time": task_info.start_time,
+                "comm": task_info.comm,
+            }
+        },
+        "ssl": {
+            "operation": match kind {
+                0 => "read",
+                1 => "write",
+                _ => "unknown"
+            },
+            "length": len,
+            "data": format!("{:?}", event.data.buf)
+        }
+    });
+
+    println!("{}", serde_json::to_string_pretty(&json_value).unwrap());
+}
 async fn handle_logging(mut rx: mpsc::Receiver<EventJsonType>, logger: Arc<dyn LoggerPlugin>) {
     while let Some(event_json) = rx.recv().await {
         // Pretty print the received event

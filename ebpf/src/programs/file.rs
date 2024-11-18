@@ -45,16 +45,14 @@ impl FileRef {
     }
 
     #[inline(always)]
-    fn track_inode(&self, inode: u64) -> Result<bool, i64> {
+    fn check_inode(&self, inode: u64) -> Result<bool, i64> {
         let tracking = &raw mut INODE_TRACKING;
         unsafe {
+            // Just check if the inode exists in our tracking map
             if let Some(_) = (*tracking).get(&inode) {
                 Ok(true)
             } else {
-                (*tracking)
-                    .insert(&inode, &1, 0) // Use 1 as a simple flag
-                    .map(|_| true)
-                    .map_err(|_| -1)
+                Ok(false)
             }
         }
     }
@@ -137,7 +135,8 @@ fn try_monitor_file_open(ctx: &ProbeContext) -> Result<(), i64> {
     // Try primary inode lookup
     if let Some(inode_ref) = file.get_inode()? {
         let inode_number = inode_ref.get_number()?;
-        if file.track_inode(inode_number)? {
+        // Check if this inode is being monitored
+        if file.check_inode(inode_number)? {
             let path_info = file.get_path()?;
             return create_file_event(ctx, &file, inode_number, path_info);
         }
@@ -146,7 +145,8 @@ fn try_monitor_file_open(ctx: &ProbeContext) -> Result<(), i64> {
     // Fallback to dentry inode lookup
     if let Some(inode_ref) = file.get_dentry_inode()? {
         let inode_number = inode_ref.get_number()?;
-        if file.track_inode(inode_number)? {
+        // Check if this inode is being monitored
+        if file.check_inode(inode_number)? {
             let path_info = file.get_path()?;
             return create_file_event(ctx, &file, inode_number, path_info);
         }

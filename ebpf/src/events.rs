@@ -6,6 +6,7 @@ pub mod file;
 pub mod listen;
 pub mod path;
 pub mod socket;
+pub mod ssl;
 
 use aya_ebpf::helpers::{
     bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_task, bpf_get_current_uid_gid,

@@ -1,5 +1,3 @@
-use crate::stack_struct;
-
 pub type FileEvent = super::Event<FileData>;
 
 #[derive(Clone, Copy)]
@@ -47,7 +45,7 @@ pub struct FileData {
     pub operation: u8,
     pub _pad: [u8; 3],
     pub comm: [u8; 16],
-    pub path: [u8; 64], // Reduced from 128 to help verifier
+    pub path: [u8; 64],
     pub path_len: u16,
 }
 
